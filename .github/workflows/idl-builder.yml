@@ -34,9 +34,7 @@ jobs:
           cp "$FILE" /tmp/lib.rs
 
       - name: Install system deps
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y pkg-config build-essential libudev-dev libssl-dev curl bzip2
+        run: sudo apt-get update -qq && sudo apt-get install -y pkg-config build-essential libudev-dev libssl-dev curl bzip2
 
       - name: Setup Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -128,98 +126,68 @@ jobs:
           fi
 
           echo "=== declare_id ===" && grep "declare_id" anchor-project/programs/deployer/src/lib.rs
+          echo "PROG=$PROG" >> "$GITHUB_ENV"
+          echo "PROG_ADDR=$ADDR" >> "$GITHUB_ENV"
 
-          # Add .cargo/config.toml to configure build
-          mkdir -p anchor-project/.cargo
-          cat > anchor-project/.cargo/config.toml << 'CARGO_CONFIG'
-[build]
-# Use all CPU cores for faster compilation
-jobs = 4
-CARGO_CONFIG
-
-          # Store program name for later steps
-          echo "PROG=$PROG" >> $GITHUB_ENV
-          echo "PROG_ADDR=$ADDR" >> $GITHUB_ENV
-
-      - name: Build IDL via anchor-lang idl-build feature
+      - name: Build IDL
         working-directory: anchor-project
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
           PROG="${{ env.PROG }}"
           echo "Building IDL for program: $PROG"
-          
-          # Delete stale Cargo.lock if any
           rm -f Cargo.lock
-          
-          # Create output directory for IDL
           mkdir -p target/idl
-          IDL_OUT="$(pwd)/target/idl/${PROG}.json"
-          
-          echo "IDL output will be at: $IDL_OUT"
-          
-          # Set anchor env var so proc macro writes IDL to our desired path
-          # anchor-lang idl-build feature reads ANCHOR_IDL_BUILD_PROGRAM_LIB_PATH
-          ANCHOR_IDL_BUILD_PROGRAM_LIB_PATH="$IDL_OUT" \
-            cargo build --features idl-build 2>&1
-          
-          BUILD_EXIT=$?
-          echo "Build exit code: $BUILD_EXIT"
-          
-          # Check if IDL was written to the designated path
-          if [ -f "$IDL_OUT" ]; then
-            echo "IDL found at designated path!"
-          else
-            echo "IDL not at designated path, searching in build outputs..."
-            # Search in cargo's OUT_DIR locations
-            find ./target -name "idl.json" 2>/dev/null | head -10
-            find ./target/debug/build -name "*.json" 2>/dev/null | grep -v fingerprint | head -20
-            # Try finding any anchor-like JSON (has 'instructions' or 'address' key)
-            find ./target -name "*.json" 2>/dev/null | grep -v "rustc_info|fingerprint|CACHEDIR|incremental" | while read f; do
-              if python3 -c "import json,sys; d=json.load(open('$f')); print('$f') if 'instructions' in d or 'name' in d else None" 2>/dev/null; then
-                echo "Candidate IDL: $f"
-              fi
-            done
-          fi
-          
-          echo "=== All JSON in target (excluding noise) ==="
-          find ./target -name "*.json" 2>/dev/null | grep -v "rustc_info|fingerprint|CACHEDIR|incremental" | head -30
 
-      - name: Save IDL output
+          IDL_OUT="$(pwd)/target/idl/${PROG}.json"
+          echo "Designated IDL output: $IDL_OUT"
+
+          ANCHOR_IDL_BUILD_PROGRAM_LIB_PATH="$IDL_OUT" cargo build --features idl-build 2>&1
+          BUILD_EXIT=$?
+          echo "Cargo exit: $BUILD_EXIT"
+
+          echo "=== JSON files in target/debug/build (OUT_DIR candidates) ==="
+          find ./target/debug/build -name "idl.json" 2>/dev/null | head -10 || true
+          find ./target/debug/build -name "*.json" 2>/dev/null | grep -v fingerprint | head -20 || true
+          echo "=== target/idl ==="
+          ls -la ./target/idl/ 2>/dev/null || echo "empty"
+
+      - name: Extract and save IDL
         run: |
           PROG="${{ env.PROG }}"
-          
-          # Primary: check the designated output path
-          IDL_OUT="anchor-project/target/idl/${PROG}.json"
-          
-          if [ -f "$IDL_OUT" ]; then
-            IDL="$IDL_OUT"
-          else
-            # Search in build output dirs for idl.json
-            IDL=$(find anchor-project/target -name "idl.json" 2>/dev/null | head -1)
+          JOB_ID="${{ inputs.job_id }}"
+
+          # Priority 1: designated output path
+          IDL="anchor-project/target/idl/${PROG}.json"
+
+          # Priority 2: look for idl.json in cargo build output dirs
+          if [ ! -f "$IDL" ]; then
+            FOUND=$(find anchor-project/target/debug/build -name "idl.json" 2>/dev/null | head -1)
+            if [ -n "$FOUND" ]; then IDL="$FOUND"; fi
           fi
-          
-          if [ -z "$IDL" ]; then
-            # Broader search - find JSON with 'instructions' key (anchor IDL signature)
+
+          # Priority 3: any JSON with 'instructions' array (anchor IDL signature)
+          if [ ! -f "$IDL" ] || ! python3 -c "import json; d=json.load(open('$IDL')); exit(0 if 'instructions' in d else 1)" 2>/dev/null; then
+            echo "Searching for anchor IDL by content..."
             for f in $(find anchor-project/target -name "*.json" 2>/dev/null | grep -v "rustc_info|fingerprint|CACHEDIR|incremental"); do
               if python3 -c "import json; d=json.load(open('$f')); exit(0 if 'instructions' in d else 1)" 2>/dev/null; then
                 IDL="$f"
-                echo "Found anchor IDL (has instructions): $f"
+                echo "Found by content: $IDL"
                 break
               fi
             done
           fi
-          
-          if [ -z "$IDL" ]; then
-            echo "ERROR: No IDL found"
-            echo "All JSON files in target:"
-            find anchor-project/target -name "*.json" 2>/dev/null | head -30
+
+          if [ ! -f "$IDL" ]; then
+            echo "ERROR: No anchor IDL found"
+            echo "All JSON files:"
+            find anchor-project/target -name "*.json" 2>/dev/null | grep -v "rustc_info|fingerprint|CACHEDIR|incremental" | head -30
             exit 1
           fi
-          
-          echo "Found IDL: $IDL"
+
+          echo "Using IDL: $IDL"
           cat "$IDL"
           mkdir -p outputs
-          cp "$IDL" "outputs/${{ inputs.job_id }}.json"
+          cp "$IDL" "outputs/$JOB_ID.json"
 
       - name: Commit IDL output
         env:
