@@ -8,7 +8,7 @@ on:
         type: string
 
 env:
-  SOLANA_VERSION: "2.2.12"
+  SOLANA_VERSION: "2.3.1"
   SOLANA_INSTALL_DIR: /home/runner/.local/share/solana/install
   SOLANA_BIN: /home/runner/.local/share/solana/install/active_release/bin
 
@@ -45,14 +45,14 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-registry-anchor0301-stable-${{ runner.os }}-v3
+          key: cargo-registry-anchor0301-stable-${{ runner.os }}-v4
 
       - name: Cache Anchor CLI binary
         id: cache-anchor
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/anchor
-          key: anchor-bin-0.30.1-stable-${{ runner.os }}-v5
+          key: anchor-bin-0.30.1-stable-${{ runner.os }}-v6
 
       - name: Install Anchor CLI 0.30.1
         if: steps.cache-anchor.outputs.cache-hit != 'true'
@@ -64,7 +64,7 @@ jobs:
       - name: Verify Anchor version
         run: anchor --version
 
-      - name: Cache Solana installation
+      - name: Cache Solana 2.3.1
         id: cache-solana
         uses: actions/cache@v4
         with:
@@ -76,7 +76,6 @@ jobs:
         run: |
           TARBALL="solana-release-x86_64-unknown-linux-gnu.tar.bz2"
           mkdir -p "${{ env.SOLANA_INSTALL_DIR }}"
-          # Solana 2.x is published by anza-xyz/agave
           curl -L --retry 5 --retry-delay 10 --retry-connrefused \
             "https://github.com/anza-xyz/agave/releases/download/v${{ env.SOLANA_VERSION }}/${TARBALL}" \
             -o /tmp/solana.tar.bz2
@@ -87,8 +86,11 @@ jobs:
         run: |
           echo "${{ env.SOLANA_BIN }}" >> "$GITHUB_PATH"
           "${{ env.SOLANA_BIN }}/solana" --version
-          echo "cargo-build-sbf version check:"
-          "${{ env.SOLANA_BIN }}/cargo-build-sbf" --version 2>/dev/null || echo "no --version flag"
+          # Show bundled cargo version (should be >= 1.85 for edition2024 support)
+          PLATFORM_TOOLS="${{ env.SOLANA_BIN }}/sdk/sbf/dependencies/platform-tools"
+          if [ -f "${PLATFORM_TOOLS}/rust/bin/cargo" ]; then
+            "${PLATFORM_TOOLS}/rust/bin/cargo" --version || true
+          fi
 
       - name: Solana keygen
         run: |
