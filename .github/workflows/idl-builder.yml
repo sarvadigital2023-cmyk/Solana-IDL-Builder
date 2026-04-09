@@ -1,0 +1,13 @@
+name: IDL Builder Test
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: Job ID
+        required: true
+        type: string
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "job_id is ${{ inputs.job_id }}"
