@@ -8,6 +8,8 @@ on:
         type: string
 
 env:
+  SOLANA_VERSION: "1.18.26"
+  SOLANA_INSTALL_DIR: /home/runner/.local/share/solana/install
   SOLANA_BIN: /home/runner/.local/share/solana/install/active_release/bin
 
 jobs:
@@ -34,7 +36,7 @@ jobs:
       - name: Install system deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y pkg-config build-essential libudev-dev libssl-dev curl
+          sudo apt-get install -y pkg-config build-essential libudev-dev libssl-dev curl bzip2
 
       - name: Setup Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -64,14 +66,35 @@ jobs:
       - name: Verify Anchor version
         run: anchor --version
 
-      - name: Install Solana 1.18.26
+      - name: Cache Solana installation
+        id: cache-solana
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.SOLANA_INSTALL_DIR }}
+          key: solana-${{ env.SOLANA_VERSION }}-${{ runner.os }}-v1
+
+      - name: Install Solana ${{ env.SOLANA_VERSION }}
+        if: steps.cache-solana.outputs.cache-hit != 'true'
         run: |
-          SOLANA_RELEASE_URL="https://release.solana.com/v1.18.26/install"
-          echo "Installing Solana 1.18.26..."
-          sh -c "$(curl -sSfL $SOLANA_RELEASE_URL)"
-          echo "Solana installed at: ${{ env.SOLANA_BIN }}"
+          TARBALL="solana-release-x86_64-unknown-linux-gnu.tar.bz2"
+          mkdir -p "${{ env.SOLANA_INSTALL_DIR }}"
+
+          echo "Downloading Solana v${{ env.SOLANA_VERSION }} from GitHub releases..."
+          curl -L --retry 5 --retry-delay 10 --retry-connrefused \
+            "https://github.com/solana-labs/solana/releases/download/v${{ env.SOLANA_VERSION }}/${TARBALL}" \
+            -o /tmp/solana.tar.bz2
+
+          echo "Extracting Solana..."
+          tar xjf /tmp/solana.tar.bz2 -C "${{ env.SOLANA_INSTALL_DIR }}"
+
+          echo "Creating active_release symlink..."
+          ln -sfn "${{ env.SOLANA_INSTALL_DIR }}/solana-release" "${{ env.SOLANA_INSTALL_DIR }}/active_release"
+
+      - name: Add Solana to PATH
+        run: |
           echo "${{ env.SOLANA_BIN }}" >> "$GITHUB_PATH"
           "${{ env.SOLANA_BIN }}/solana" --version
+          echo "Solana ready at: ${{ env.SOLANA_BIN }}"
 
       - name: Solana keygen
         run: |
@@ -92,10 +115,8 @@ jobs:
           cp template/Cargo.toml anchor-project/Cargo.toml
           sed "s/{{PROG_NAME}}/$PROG/g; s/{{PROG_ADDR}}/$ADDR/g" template/programs/deployer/Cargo.toml.tpl > anchor-project/programs/deployer/Cargo.toml
           sed "s/{{PROG_NAME}}/$PROG/g; s/{{PROG_ADDR}}/$ADDR/g" template/Anchor.toml.tpl > anchor-project/Anchor.toml
-          echo "=== Anchor.toml ==="
-          cat anchor-project/Anchor.toml
-          echo "=== Cargo.toml ==="
-          cat anchor-project/programs/deployer/Cargo.toml
+          echo "=== Anchor.toml ===" && cat anchor-project/Anchor.toml
+          echo "=== programs/deployer/Cargo.toml ===" && cat anchor-project/programs/deployer/Cargo.toml
 
       - name: Build Anchor project
         working-directory: anchor-project
