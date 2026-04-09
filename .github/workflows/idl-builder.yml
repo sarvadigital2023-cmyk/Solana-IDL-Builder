@@ -1,6 +1,5 @@
 name: Generate Anchor IDL
-
-"on":
+on:
   workflow_dispatch:
     inputs:
       job_id:
@@ -42,7 +41,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             ~/.cargo/bin/anchor
-          key: anchor-0.30.1-${{ runner.os }}-v2
+          key: anchor-0.30.1-${{ runner.os }}-v3
 
       - name: Install Solana 1.18.26
         run: |
@@ -63,67 +62,16 @@ jobs:
           mkdir -p ~/.config/solana
           solana-keygen new --no-bip39-passphrase -o ~/.config/solana/id.json --force
 
-      - name: Extract program metadata
-        id: meta
+      - name: Setup Anchor project from template
         run: |
-          PROG=$(grep -oP 'pub mod \K\w+' /tmp/lib.rs | head -1 || true)
-          [ -z "$PROG" ] && PROG=deployer
-          ADDR=$(grep -oP '(?<=declare_id!\(")[^"]+' /tmp/lib.rs 2>/dev/null | head -1 || true)
-          [ -z "$ADDR" ] && ADDR=11111111111111111111111111111111
-          echo "name=$PROG" >> "$GITHUB_OUTPUT"
-          echo "addr=$ADDR" >> "$GITHUB_OUTPUT"
+          PROG=$(grep -oP 'pub mod \K\w+' /tmp/lib.rs | head -1 || echo deployer)
+          ADDR=$(grep -oP '(?<=declare_id!\(")[^"]+' /tmp/lib.rs 2>/dev/null | head -1 || echo 11111111111111111111111111111111)
           echo "Program=$PROG addr=$ADDR"
-
-      - name: Setup Anchor project
-        run: |
-          PROG="${{ steps.meta.outputs.name }}"
-          ADDR="${{ steps.meta.outputs.addr }}"
           mkdir -p anchor-project/programs/deployer/src
           cp /tmp/lib.rs anchor-project/programs/deployer/src/lib.rs
-
-          cat > anchor-project/Cargo.toml << 'CEOF'
-[workspace]
-members = ["programs/deployer"]
-resolver = "2"
-[profile.release]
-overflow-checks = true
-lto = "fat"
-codegen-units = 1
-CEOF
-
-          cat > anchor-project/programs/deployer/Cargo.toml << PEOF
-[package]
-name = "$PROG"
-version = "0.1.0"
-edition = "2021"
-[lib]
-crate-type = ["cdylib", "lib"]
-name = "$PROG"
-[features]
-no-entrypoint = []
-no-idl = []
-no-log-ix-name = []
-cpi = ["no-entrypoint"]
-default = []
-idl-build = ["anchor-lang/idl-build"]
-[dependencies]
-anchor-lang = { version = "0.30.1", features = ["init-if-needed"] }
-PEOF
-
-          cat > anchor-project/Anchor.toml << AEOF
-[features]
-resolution = true
-skip-lint = false
-[programs.localnet]
-$PROG = "$ADDR"
-[registry]
-url = "https://api.apr.dev"
-[provider]
-cluster = "Localnet"
-wallet = "~/.config/solana/id.json"
-[workspace]
-members = ["programs/deployer"]
-AEOF
+          cp template/Cargo.toml anchor-project/Cargo.toml
+          sed "s/{{PROG_NAME}}/$PROG/g; s/{{PROG_ADDR}}/$ADDR/g" template/programs/deployer/Cargo.toml.tpl > anchor-project/programs/deployer/Cargo.toml
+          sed "s/{{PROG_NAME}}/$PROG/g; s/{{PROG_ADDR}}/$ADDR/g" template/Anchor.toml.tpl > anchor-project/Anchor.toml
 
       - name: Build Anchor project
         working-directory: anchor-project
@@ -133,20 +81,19 @@ AEOF
         run: |
           IDL=$(find anchor-project/target/idl -name "*.json" 2>/dev/null | head -1)
           if [ -z "$IDL" ]; then
-            echo "ERROR: No IDL found"
+            echo "ERROR: No IDL found after build"
             exit 1
           fi
           echo "Found IDL: $IDL"
           mkdir -p outputs
           cp "$IDL" "outputs/${{ inputs.job_id }}.json"
-          echo "IDL content:"
           cat "outputs/${{ inputs.job_id }}.json"
 
       - name: Commit IDL
+        env:
+          JOB_ID: ${{ inputs.job_id }}
         run: |
-          git_user="github-actions[bot]"
-          git_email="41898282+github-actions[bot]@users.noreply.github.com"
-          git -c user.email="$git_email" -c user.name="$git_user" pull --rebase origin main || true
-          git -c user.email="$git_email" -c user.name="$git_user" add "outputs/${{ inputs.job_id }}.json"
-          git -c user.email="$git_email" -c user.name="$git_user" commit -m "IDL output for ${{ inputs.job_id }}"
+          git pull --rebase origin main || true
+          git add "outputs/$JOB_ID.json"
+          git -c user.email="41898282+github-actions[bot]@users.noreply.github.com" -c user.name="github-actions[bot]" commit -m "IDL output for $JOB_ID"
           git push
