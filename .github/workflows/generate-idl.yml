@@ -1,0 +1,162 @@
+name: Generate Anchor IDL
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: 'Unique job identifier for tracking'
+        required: true
+
+jobs:
+  generate-idl:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read lib.rs from inputs
+        run: |
+          INPUT_FILE="inputs/${{ github.event.inputs.job_id }}/lib.rs"
+          if [ ! -f "$INPUT_FILE" ]; then
+            echo "ERROR: lib.rs not found at $INPUT_FILE"
+            exit 1
+          fi
+          cp "$INPUT_FILE" /tmp/lib.rs
+          echo "lib.rs loaded ($(wc -c < /tmp/lib.rs) bytes)"
+
+      - name: Install system dependencies
+        run: sudo apt-get install -y pkg-config build-essential libudev-dev libssl-dev
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/anchor
+          key: ${{ runner.os }}-anchor-0.30.1-v3
+          restore-keys: |
+            ${{ runner.os }}-anchor-0.30.1-
+
+      - name: Install Solana CLI 1.18.26
+        run: |
+          if ! command -v solana &> /dev/null; then
+            sh -c "$(curl -sSfL https://release.solana.com/v1.18.26/install)"
+          fi
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> $GITHUB_PATH
+
+      - name: Generate Solana keypair
+        run: |
+          mkdir -p ~/.config/solana
+          $HOME/.local/share/solana/install/active_release/bin/solana-keygen new --no-bip39-passphrase -o ~/.config/solana/id.json --force 2>/dev/null || true
+
+      - name: Install Anchor CLI 0.30.1
+        run: |
+          if ! command -v anchor &> /dev/null || ! anchor --version 2>/dev/null | grep -q "0.30.1"; then
+            cargo install --git https://github.com/coral-xyz/anchor --tag v0.30.1 anchor-cli --locked --force
+          fi
+          anchor --version
+
+      - name: Extract program info
+        id: info
+        run: |
+          PROGRAM_NAME=$(grep -oP '(?<=#\[program\]\s*pub\s+mod\s+)\w+' /tmp/lib.rs | head -1 || echo "")
+          [ -z "$PROGRAM_NAME" ] && PROGRAM_NAME="deployer"
+          echo "program_name=$PROGRAM_NAME" >> $GITHUB_OUTPUT
+          PROG_ADDR=$(grep -oP '(?<=declare_id!\(")[^"]+' /tmp/lib.rs | head -1 || echo "")
+          [ -z "$PROG_ADDR" ] && PROG_ADDR="11111111111111111111111111111111"
+          echo "program_address=$PROG_ADDR" >> $GITHUB_OUTPUT
+          HAS_SPL=$(grep -c "anchor_spl\|spl_token" /tmp/lib.rs 2>/dev/null || echo "0")
+          echo "has_spl=$HAS_SPL" >> $GITHUB_OUTPUT
+          echo "Program: $PROGRAM_NAME at $PROG_ADDR"
+
+      - name: Setup Anchor project
+        run: |
+          PROG_NAME="${{ steps.info.outputs.program_name }}"
+          PROG_ADDR="${{ steps.info.outputs.program_address }}"
+          HAS_SPL="${{ steps.info.outputs.has_spl }}"
+          mkdir -p anchor-project/programs/deployer/src
+          cp /tmp/lib.rs anchor-project/programs/deployer/src/lib.rs
+          cat > anchor-project/Cargo.toml << 'CARGO_EOF'
+[workspace]
+members = ["programs/deployer"]
+resolver = "2"
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
+[profile.release.build-override]
+opt-level = 3
+incremental = false
+codegen-units = 1
+CARGO_EOF
+          {
+            echo "[package]"
+            echo "name = \"$PROG_NAME\""
+            echo "version = \"0.1.0\""
+            echo "edition = \"2021\""
+            echo "[lib]"
+            echo "crate-type = [\"cdylib\", \"lib\"]"
+            echo "name = \"$PROG_NAME\""
+            echo "[features]"
+            echo "no-entrypoint = []"
+            echo "no-idl = []"
+            echo "no-log-ix-name = []"
+            echo "cpi = [\"no-entrypoint\"]"
+            echo "default = []"
+            echo "idl-build = [\"anchor-lang/idl-build\"]"
+            echo "[dependencies]"
+            echo "anchor-lang = { version = \"0.30.1\", features = [\"init-if-needed\"] }"
+            if [ "$HAS_SPL" != "0" ] && [ -n "$HAS_SPL" ]; then
+              echo "anchor-spl = { version = \"0.30.1\", features = [\"token\", \"associated_token\", \"metadata\"] }"
+            fi
+          } > anchor-project/programs/deployer/Cargo.toml
+          {
+            echo "[features]"
+            echo "resolution = true"
+            echo "skip-lint = false"
+            echo "[programs.localnet]"
+            echo "$PROG_NAME = \"$PROG_ADDR\""
+            echo "[registry]"
+            echo "url = \"https://api.apr.dev\""
+            echo "[provider]"
+            echo "cluster = \"Localnet\""
+            echo "wallet = \"~/.config/solana/id.json\""
+            echo "[workspace]"
+            echo "members = [\"programs/deployer\"]"
+          } > anchor-project/Anchor.toml
+
+      - name: Build Anchor project
+        working-directory: anchor-project
+        run: anchor build 2>&1
+
+      - name: Find and save IDL
+        working-directory: anchor-project
+        run: |
+          IDL_FILE=$(find target/idl -name "*.json" 2>/dev/null | head -1)
+          if [ -z "$IDL_FILE" ]; then
+            echo "ERROR: No IDL found in target/idl after build"
+            ls -la target/ 2>/dev/null || true
+            exit 1
+          fi
+          echo "Found IDL: $IDL_FILE"
+          cp "$IDL_FILE" /tmp/output_idl.json
+          cat /tmp/output_idl.json
+
+      - name: Commit IDL to outputs
+        run: |
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git pull --rebase origin main || true
+          mkdir -p outputs
+          cp /tmp/output_idl.json "outputs/${{ github.event.inputs.job_id }}.json"
+          git add "outputs/${{ github.event.inputs.job_id }}.json"
+          git commit -m "IDL output for job ${{ github.event.inputs.job_id }}"
+          git push
