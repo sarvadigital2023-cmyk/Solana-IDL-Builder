@@ -29,19 +29,39 @@ jobs:
           cp "$FILE" /tmp/lib.rs
 
       - name: Install system deps
-        run: sudo apt-get install -y pkg-config build-essential libudev-dev libssl-dev
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y pkg-config build-essential libudev-dev libssl-dev curl
 
-      - name: Setup Rust
+      - name: Setup Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache Cargo
+      - name: Cache Cargo registry
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            ~/.cargo/bin/anchor
-          key: anchor-0.30.1-${{ runner.os }}-v3
+          key: cargo-registry-anchor-0.30.1-${{ runner.os }}-v1
+
+      - name: Cache Anchor CLI binary
+        id: cache-anchor
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/anchor
+          key: anchor-bin-0.30.1-${{ runner.os }}-v2
+
+      - name: Install Anchor CLI 0.30.1
+        if: steps.cache-anchor.outputs.cache-hit != 'true'
+        run: |
+          echo "Installing anchor-cli 0.30.1 from crates.io..."
+          cargo install anchor-cli --version "=0.30.1" --force
+          echo "Anchor version: $(anchor --version)"
+
+      - name: Verify Anchor version
+        run: |
+          anchor --version
+          which anchor
 
       - name: Install Solana 1.18.26
         run: |
@@ -50,15 +70,9 @@ jobs:
           fi
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
 
-      - name: Install Anchor CLI 0.30.1
-        run: |
-          if ! anchor --version 2>/dev/null | grep -q 0.30.1; then
-            cargo install --git https://github.com/coral-xyz/anchor --tag v0.30.1 anchor-cli --locked --force
-          fi
-          anchor --version
-
       - name: Solana keygen
         run: |
+          solana --version
           mkdir -p ~/.config/solana
           solana-keygen new --no-bip39-passphrase -o ~/.config/solana/id.json --force
 
@@ -66,34 +80,44 @@ jobs:
         run: |
           PROG=$(grep -oP 'pub mod \K\w+' /tmp/lib.rs | head -1 || echo deployer)
           ADDR=$(grep -oP '(?<=declare_id!\(")[^"]+' /tmp/lib.rs 2>/dev/null | head -1 || echo 11111111111111111111111111111111)
-          echo "Program=$PROG addr=$ADDR"
+          echo "Program name: $PROG"
+          echo "Program addr: $ADDR"
           mkdir -p anchor-project/programs/deployer/src
           cp /tmp/lib.rs anchor-project/programs/deployer/src/lib.rs
           cp template/Cargo.toml anchor-project/Cargo.toml
           sed "s/{{PROG_NAME}}/$PROG/g; s/{{PROG_ADDR}}/$ADDR/g" template/programs/deployer/Cargo.toml.tpl > anchor-project/programs/deployer/Cargo.toml
           sed "s/{{PROG_NAME}}/$PROG/g; s/{{PROG_ADDR}}/$ADDR/g" template/Anchor.toml.tpl > anchor-project/Anchor.toml
+          echo "=== Anchor.toml ==="
+          cat anchor-project/Anchor.toml
+          echo "=== programs/deployer/Cargo.toml ==="
+          cat anchor-project/programs/deployer/Cargo.toml
 
       - name: Build Anchor project
         working-directory: anchor-project
-        run: anchor build 2>&1
+        run: |
+          anchor build 2>&1
+          echo "Build exit code: $?"
 
       - name: Save IDL output
         run: |
           IDL=$(find anchor-project/target/idl -name "*.json" 2>/dev/null | head -1)
           if [ -z "$IDL" ]; then
-            echo "ERROR: No IDL found after build"
+            echo "ERROR: No IDL file found in anchor-project/target/idl/"
+            find anchor-project/target/ -name "*.json" 2>/dev/null | head -20 || true
             exit 1
           fi
           echo "Found IDL: $IDL"
+          cat "$IDL"
           mkdir -p outputs
           cp "$IDL" "outputs/${{ inputs.job_id }}.json"
-          cat "outputs/${{ inputs.job_id }}.json"
 
-      - name: Commit IDL
+      - name: Commit IDL output
         env:
           JOB_ID: ${{ inputs.job_id }}
         run: |
           git pull --rebase origin main || true
           git add "outputs/$JOB_ID.json"
-          git -c user.email="41898282+github-actions[bot]@users.noreply.github.com" -c user.name="github-actions[bot]" commit -m "IDL output for $JOB_ID"
+          git -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              -c user.name="github-actions[bot]" \
+              commit -m "IDL output for $JOB_ID"
           git push
