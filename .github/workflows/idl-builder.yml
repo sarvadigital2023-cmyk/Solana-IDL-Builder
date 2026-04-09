@@ -7,6 +7,9 @@ on:
         required: true
         type: string
 
+env:
+  SOLANA_BIN: /home/runner/.local/share/solana/install/active_release/bin
+
 jobs:
   generate-idl:
     runs-on: ubuntu-latest
@@ -56,28 +59,30 @@ jobs:
         run: |
           echo "Installing anchor-cli 0.30.1 from crates.io..."
           cargo install anchor-cli --version "=0.30.1" --force
-          echo "Anchor version: $(anchor --version)"
+          anchor --version
 
       - name: Verify Anchor version
-        run: |
-          anchor --version
-          which anchor
+        run: anchor --version
 
       - name: Install Solana 1.18.26
         run: |
-          if ! command -v solana &>/dev/null; then
-            sh -c "$(curl -sSfL https://release.solana.com/v1.18.26/install)"
-          fi
-          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+          SOLANA_RELEASE_URL="https://release.solana.com/v1.18.26/install"
+          echo "Installing Solana 1.18.26..."
+          sh -c "$(curl -sSfL $SOLANA_RELEASE_URL)"
+          echo "Solana installed at: ${{ env.SOLANA_BIN }}"
+          echo "${{ env.SOLANA_BIN }}" >> "$GITHUB_PATH"
+          "${{ env.SOLANA_BIN }}/solana" --version
 
       - name: Solana keygen
         run: |
+          export PATH="${{ env.SOLANA_BIN }}:$PATH"
           solana --version
           mkdir -p ~/.config/solana
           solana-keygen new --no-bip39-passphrase -o ~/.config/solana/id.json --force
 
       - name: Setup Anchor project from template
         run: |
+          export PATH="${{ env.SOLANA_BIN }}:$PATH"
           PROG=$(grep -oP 'pub mod \K\w+' /tmp/lib.rs | head -1 || echo deployer)
           ADDR=$(grep -oP '(?<=declare_id!\(")[^"]+' /tmp/lib.rs 2>/dev/null | head -1 || echo 11111111111111111111111111111111)
           echo "Program name: $PROG"
@@ -89,12 +94,13 @@ jobs:
           sed "s/{{PROG_NAME}}/$PROG/g; s/{{PROG_ADDR}}/$ADDR/g" template/Anchor.toml.tpl > anchor-project/Anchor.toml
           echo "=== Anchor.toml ==="
           cat anchor-project/Anchor.toml
-          echo "=== programs/deployer/Cargo.toml ==="
+          echo "=== Cargo.toml ==="
           cat anchor-project/programs/deployer/Cargo.toml
 
       - name: Build Anchor project
         working-directory: anchor-project
         run: |
+          export PATH="${{ env.SOLANA_BIN }}:$PATH"
           anchor build 2>&1
           echo "Build exit code: $?"
 
@@ -102,7 +108,7 @@ jobs:
         run: |
           IDL=$(find anchor-project/target/idl -name "*.json" 2>/dev/null | head -1)
           if [ -z "$IDL" ]; then
-            echo "ERROR: No IDL file found in anchor-project/target/idl/"
+            echo "ERROR: No IDL found in anchor-project/target/idl/"
             find anchor-project/target/ -name "*.json" 2>/dev/null | head -20 || true
             exit 1
           fi
