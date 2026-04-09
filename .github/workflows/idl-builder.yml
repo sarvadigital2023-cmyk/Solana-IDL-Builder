@@ -38,8 +38,10 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y pkg-config build-essential libudev-dev libssl-dev curl bzip2
 
-      - name: Setup Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Rust 1.77
+        uses: dtolnay/rust-toolchain@1.77
+        with:
+          toolchain: "1.77"
 
       - name: Cache Cargo registry
         uses: actions/cache@v4
@@ -47,14 +49,14 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-registry-anchor-0.30.1-${{ runner.os }}-v1
+          key: cargo-registry-anchor-0.30.1-rust177-${{ runner.os }}-v1
 
       - name: Cache Anchor CLI binary
         id: cache-anchor
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/anchor
-          key: anchor-bin-0.30.1-${{ runner.os }}-v2
+          key: anchor-bin-0.30.1-rust177-${{ runner.os }}-v1
 
       - name: Install Anchor CLI 0.30.1
         if: steps.cache-anchor.outputs.cache-hit != 'true'
@@ -94,7 +96,6 @@ jobs:
       - name: Solana keygen
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
-          solana --version
           mkdir -p ~/.config/solana
           solana-keygen new --no-bip39-passphrase -o ~/.config/solana/id.json --force
 
@@ -106,20 +107,19 @@ jobs:
           echo "Program name: $PROG"
 
           RAW_ADDR=$(grep -oP '(?<=declare_id!\(")[^"]+' /tmp/lib.rs 2>/dev/null | head -1 || true)
-          echo "Raw extracted address: $RAW_ADDR"
+          echo "Raw address: $RAW_ADDR"
 
           if python3 scripts/check_b58.py "$RAW_ADDR" 2>&1; then
             ADDR="$RAW_ADDR"
             echo "Using declare_id address: $ADDR"
           else
-            echo "Address is invalid Base58 — generating fresh keypair..."
+            echo "Invalid Base58 — generating fresh keypair..."
             TMP_KEY=/tmp/idl-build-key.json
             solana-keygen new --no-bip39-passphrase -o "$TMP_KEY" --force
             ADDR=$(solana-keygen pubkey "$TMP_KEY")
             echo "Generated address: $ADDR"
           fi
-
-          echo "Final program address: $ADDR"
+          echo "Final address: $ADDR"
 
           mkdir -p anchor-project/programs/deployer/src
           cp /tmp/lib.rs anchor-project/programs/deployer/src/lib.rs
@@ -130,18 +130,20 @@ jobs:
             template/Anchor.toml.tpl > anchor-project/Anchor.toml
 
           if [ "$ADDR" != "$RAW_ADDR" ]; then
-            echo "Patching declare_id! in lib.rs..."
             python3 scripts/patch_declare_id.py anchor-project/programs/deployer/src/lib.rs "$ADDR"
           fi
 
+          echo "=== declare_id check ===" && grep "declare_id" anchor-project/programs/deployer/src/lib.rs
           echo "=== Anchor.toml ===" && cat anchor-project/Anchor.toml
-          echo "=== Cargo.toml ===" && cat anchor-project/programs/deployer/Cargo.toml
-          echo "=== lib.rs declare_id ===" && grep "declare_id" anchor-project/programs/deployer/src/lib.rs
 
       - name: Build Anchor project
         working-directory: anchor-project
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
+          # Remove any stale Cargo.lock (may be incompatible version format)
+          rm -f Cargo.lock
+          echo "Rust version: $(rustc --version)"
+          echo "Cargo version: $(cargo --version)"
           anchor build 2>&1
           echo "Build exit code: $?"
 
@@ -149,7 +151,7 @@ jobs:
         run: |
           IDL=$(find anchor-project/target/idl -name "*.json" 2>/dev/null | head -1)
           if [ -z "$IDL" ]; then
-            echo "ERROR: No IDL found in anchor-project/target/idl/"
+            echo "ERROR: No IDL found"
             find anchor-project/target/ -name "*.json" 2>/dev/null | head -20 || true
             exit 1
           fi
