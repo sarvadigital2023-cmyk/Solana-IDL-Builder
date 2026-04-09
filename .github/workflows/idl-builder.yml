@@ -11,6 +11,9 @@ env:
   SOLANA_VERSION: "1.18.26"
   SOLANA_INSTALL_DIR: /home/runner/.local/share/solana/install
   SOLANA_BIN: /home/runner/.local/share/solana/install/active_release/bin
+  # Rust 1.80: last version before Cargo.lock v4 became default (v4 = Rust 1.81+)
+  # Solana bundled toolchain can't read v4 lockfiles
+  RUST_VERSION: "1.80"
 
 jobs:
   generate-idl:
@@ -38,8 +41,10 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y pkg-config build-essential libudev-dev libssl-dev curl bzip2
 
-      - name: Setup Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
 
       - name: Cache Cargo registry
         uses: actions/cache@v4
@@ -47,14 +52,14 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-registry-anchor-0.30.1-${{ runner.os }}-v2
+          key: cargo-registry-anchor0301-rust180-${{ runner.os }}-v1
 
       - name: Cache Anchor CLI binary
         id: cache-anchor
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/anchor
-          key: anchor-bin-0.30.1-stable-${{ runner.os }}-v3
+          key: anchor-bin-0.30.1-rust180-${{ runner.os }}-v1
 
       - name: Install Anchor CLI 0.30.1
         if: steps.cache-anchor.outputs.cache-hit != 'true'
@@ -133,24 +138,27 @@ jobs:
 
           echo "=== declare_id ===" && grep "declare_id" anchor-project/programs/deployer/src/lib.rs
           echo "=== Anchor.toml ===" && cat anchor-project/Anchor.toml
-          echo "=== Cargo.toml ===" && cat anchor-project/programs/deployer/Cargo.toml
+          echo "=== program Cargo.toml ===" && cat anchor-project/programs/deployer/Cargo.toml
 
       - name: Build Anchor project
         working-directory: anchor-project
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
-          # Always remove Cargo.lock - it may be version-incompatible or stale
+          echo "Rust: $(rustc --version)"
+          echo "Cargo: $(cargo --version)"
+          # Remove any existing Cargo.lock to force fresh generation
           rm -f Cargo.lock
-          echo "Rust: $(rustc --version) | Cargo: $(cargo --version)"
           anchor build 2>&1
-          echo "Build exit code: $?"
+          BUILD_EXIT=$?
+          echo "Build exit code: $BUILD_EXIT"
+          exit $BUILD_EXIT
 
       - name: Save IDL output
         run: |
           IDL=$(find anchor-project/target/idl -name "*.json" 2>/dev/null | head -1)
           if [ -z "$IDL" ]; then
-            echo "ERROR: No IDL found"
-            find anchor-project/target/ -name "*.json" 2>/dev/null | head -20 || true
+            echo "ERROR: No IDL found in target/idl"
+            find anchor-project/target/ -type f -name "*.json" 2>/dev/null | head -20 || true
             exit 1
           fi
           echo "Found IDL: $IDL"
