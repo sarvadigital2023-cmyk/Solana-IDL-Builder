@@ -102,37 +102,25 @@ jobs:
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
 
-          # Extract program name (mod name)
           PROG=$(grep -oP 'pub mod \K\w+' /tmp/lib.rs | head -1 || echo deployer)
           echo "Program name: $PROG"
 
-          # Extract declare_id address
           RAW_ADDR=$(grep -oP '(?<=declare_id!\(")[^"]+' /tmp/lib.rs 2>/dev/null | head -1 || true)
           echo "Raw extracted address: $RAW_ADDR"
 
-          # Validate Base58: must only contain valid Base58 chars and be 32-44 chars long
-          # Base58 alphabet excludes: 0 (zero), O (uppercase O), I (uppercase I), l (lowercase L)
-          is_valid_b58() {
-            local addr="$1"
-            [[ ${#addr} -ge 32 && ${#addr} -le 44 ]] && \
-            [[ "$addr" =~ ^[123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz]+$ ]]
-          }
-
-          if is_valid_b58 "$RAW_ADDR"; then
+          if python3 scripts/check_b58.py "$RAW_ADDR" 2>&1; then
             ADDR="$RAW_ADDR"
             echo "Using declare_id address: $ADDR"
           else
-            echo "WARNING: '$RAW_ADDR' is not a valid Base58 program address"
-            echo "Generating a fresh keypair for IDL build..."
+            echo "Address is invalid Base58 — generating fresh keypair..."
             TMP_KEY=/tmp/idl-build-key.json
             solana-keygen new --no-bip39-passphrase -o "$TMP_KEY" --force
             ADDR=$(solana-keygen pubkey "$TMP_KEY")
             echo "Generated address: $ADDR"
           fi
 
-          echo "Final address: $ADDR"
+          echo "Final program address: $ADDR"
 
-          # Build the project
           mkdir -p anchor-project/programs/deployer/src
           cp /tmp/lib.rs anchor-project/programs/deployer/src/lib.rs
           cp template/Cargo.toml anchor-project/Cargo.toml
@@ -141,17 +129,14 @@ jobs:
           sed "s/{{PROG_NAME}}/$PROG/g; s/{{PROG_ADDR}}/$ADDR/g" \
             template/Anchor.toml.tpl > anchor-project/Anchor.toml
 
-          echo "=== Anchor.toml ===" && cat anchor-project/Anchor.toml
-          echo "=== programs/deployer/Cargo.toml ===" && cat anchor-project/programs/deployer/Cargo.toml
-          echo "=== lib.rs first 20 lines ===" && head -20 anchor-project/programs/deployer/src/lib.rs
-
-          # Patch declare_id! in lib.rs if address changed
           if [ "$ADDR" != "$RAW_ADDR" ]; then
-            echo "Patching declare_id! in lib.rs to use valid address $ADDR"
-            sed -i "s|declare_id!("[^"]*")|declare_id!("\$ADDR")|g" \
-              anchor-project/programs/deployer/src/lib.rs
-            echo "=== lib.rs after patch ===" && head -5 anchor-project/programs/deployer/src/lib.rs
+            echo "Patching declare_id! in lib.rs..."
+            python3 scripts/patch_declare_id.py anchor-project/programs/deployer/src/lib.rs "$ADDR"
           fi
+
+          echo "=== Anchor.toml ===" && cat anchor-project/Anchor.toml
+          echo "=== Cargo.toml ===" && cat anchor-project/programs/deployer/Cargo.toml
+          echo "=== lib.rs declare_id ===" && grep "declare_id" anchor-project/programs/deployer/src/lib.rs
 
       - name: Build Anchor project
         working-directory: anchor-project
