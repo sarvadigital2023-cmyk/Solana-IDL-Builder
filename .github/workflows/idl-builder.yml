@@ -8,7 +8,7 @@ on:
         type: string
 
 env:
-  SOLANA_VERSION: "1.18.26"
+  SOLANA_VERSION: "2.2.12"
   SOLANA_INSTALL_DIR: /home/runner/.local/share/solana/install
   SOLANA_BIN: /home/runner/.local/share/solana/install/active_release/bin
 
@@ -45,14 +45,14 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-registry-anchor0301-stable-${{ runner.os }}-v2
+          key: cargo-registry-anchor0301-stable-${{ runner.os }}-v3
 
       - name: Cache Anchor CLI binary
         id: cache-anchor
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/anchor
-          key: anchor-bin-0.30.1-stable-${{ runner.os }}-v4
+          key: anchor-bin-0.30.1-stable-${{ runner.os }}-v5
 
       - name: Install Anchor CLI 0.30.1
         if: steps.cache-anchor.outputs.cache-hit != 'true'
@@ -76,8 +76,9 @@ jobs:
         run: |
           TARBALL="solana-release-x86_64-unknown-linux-gnu.tar.bz2"
           mkdir -p "${{ env.SOLANA_INSTALL_DIR }}"
+          # Solana 2.x is published by anza-xyz/agave
           curl -L --retry 5 --retry-delay 10 --retry-connrefused \
-            "https://github.com/solana-labs/solana/releases/download/v${{ env.SOLANA_VERSION }}/${TARBALL}" \
+            "https://github.com/anza-xyz/agave/releases/download/v${{ env.SOLANA_VERSION }}/${TARBALL}" \
             -o /tmp/solana.tar.bz2
           tar xjf /tmp/solana.tar.bz2 -C "${{ env.SOLANA_INSTALL_DIR }}"
           ln -sfn "${{ env.SOLANA_INSTALL_DIR }}/solana-release" "${{ env.SOLANA_INSTALL_DIR }}/active_release"
@@ -86,6 +87,8 @@ jobs:
         run: |
           echo "${{ env.SOLANA_BIN }}" >> "$GITHUB_PATH"
           "${{ env.SOLANA_BIN }}/solana" --version
+          echo "cargo-build-sbf version check:"
+          "${{ env.SOLANA_BIN }}/cargo-build-sbf" --version 2>/dev/null || echo "no --version flag"
 
       - name: Solana keygen
         run: |
@@ -129,33 +132,14 @@ jobs:
           echo "PROG=$PROG" >> "$GITHUB_ENV"
           echo "PROG_ADDR=$ADDR" >> "$GITHUB_ENV"
 
-      - name: Generate Cargo.lock and downgrade from v4 to v3
-        working-directory: anchor-project
-        run: |
-          # Host cargo generates Cargo.lock (may be v4 on Rust 1.81+)
-          # Solana bundled toolchain uses older cargo that can't read v4
-          # Fix: pre-generate with host cargo, then downgrade version field
-          rm -f Cargo.lock
-          cargo fetch 2>&1 | tail -5
-          
-          VERSION=$(grep "^version = " Cargo.lock 2>/dev/null | head -1 || echo "none")
-          echo "Cargo.lock header: $VERSION"
-          
-          if grep -q "^version = 4" Cargo.lock 2>/dev/null; then
-            echo "Downgrading Cargo.lock from v4 to v3 for Solana bundled cargo compatibility"
-            sed -i 's/^version = 4$/version = 3/' Cargo.lock
-            echo "Patched: $(grep '^version = ' Cargo.lock | head -1)"
-          else
-            echo "Cargo.lock is already v3 or lower, no patch needed"
-          fi
-
       - name: Build Anchor project
         working-directory: anchor-project
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
           echo "Rust: $(rustc --version)"
           echo "anchor: $(anchor --version)"
-          echo "Cargo.lock version: $(grep '^version = ' Cargo.lock | head -1 || echo 'not found')"
+          echo "solana: $(solana --version)"
+          rm -f Cargo.lock
           anchor build --skip-lint 2>&1
           BUILD_EXIT=$?
           echo "Build exit code: $BUILD_EXIT"
@@ -167,14 +151,14 @@ jobs:
         run: |
           PROG="${{ env.PROG }}"
           JOB_ID="${{ inputs.job_id }}"
-          
+
           IDL=$(find anchor-project/target/idl -name "*.json" 2>/dev/null | head -1)
           if [ -z "$IDL" ]; then
             echo "ERROR: No IDL in target/idl"
             find anchor-project/target -name "*.json" 2>/dev/null | grep -v "rustc_info|fingerprint|CACHEDIR|incremental" | head -20
             exit 1
           fi
-          
+
           echo "Found IDL: $IDL"
           python3 -c "import json,sys; d=json.load(open('$IDL')); print('Valid JSON, keys:', list(d.keys())[:5])"
           mkdir -p outputs
