@@ -129,63 +129,54 @@ jobs:
           echo "PROG=$PROG" >> "$GITHUB_ENV"
           echo "PROG_ADDR=$ADDR" >> "$GITHUB_ENV"
 
-      - name: Build IDL
+      - name: Generate Cargo.lock and downgrade from v4 to v3
+        working-directory: anchor-project
+        run: |
+          # Host cargo generates Cargo.lock (may be v4 on Rust 1.81+)
+          # Solana bundled toolchain uses older cargo that can't read v4
+          # Fix: pre-generate with host cargo, then downgrade version field
+          rm -f Cargo.lock
+          cargo fetch 2>&1 | tail -5
+          
+          VERSION=$(grep "^version = " Cargo.lock 2>/dev/null | head -1 || echo "none")
+          echo "Cargo.lock header: $VERSION"
+          
+          if grep -q "^version = 4" Cargo.lock 2>/dev/null; then
+            echo "Downgrading Cargo.lock from v4 to v3 for Solana bundled cargo compatibility"
+            sed -i 's/^version = 4$/version = 3/' Cargo.lock
+            echo "Patched: $(grep '^version = ' Cargo.lock | head -1)"
+          else
+            echo "Cargo.lock is already v3 or lower, no patch needed"
+          fi
+
+      - name: Build Anchor project
         working-directory: anchor-project
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
-          PROG="${{ env.PROG }}"
-          echo "Building IDL for program: $PROG"
-          rm -f Cargo.lock
-          mkdir -p target/idl
-
-          IDL_OUT="$(pwd)/target/idl/${PROG}.json"
-          echo "Designated IDL output: $IDL_OUT"
-
-          ANCHOR_IDL_BUILD_PROGRAM_LIB_PATH="$IDL_OUT" cargo build --features idl-build 2>&1
+          echo "Rust: $(rustc --version)"
+          echo "anchor: $(anchor --version)"
+          echo "Cargo.lock version: $(grep '^version = ' Cargo.lock | head -1 || echo 'not found')"
+          anchor build --skip-lint 2>&1
           BUILD_EXIT=$?
-          echo "Cargo exit: $BUILD_EXIT"
+          echo "Build exit code: $BUILD_EXIT"
+          echo "=== target/idl contents ==="
+          ls -la target/idl/ 2>/dev/null || echo "no target/idl"
+          exit $BUILD_EXIT
 
-          echo "=== JSON files in target/debug/build (OUT_DIR candidates) ==="
-          find ./target/debug/build -name "idl.json" 2>/dev/null | head -10 || true
-          find ./target/debug/build -name "*.json" 2>/dev/null | grep -v fingerprint | head -20 || true
-          echo "=== target/idl ==="
-          ls -la ./target/idl/ 2>/dev/null || echo "empty"
-
-      - name: Extract and save IDL
+      - name: Save IDL output
         run: |
           PROG="${{ env.PROG }}"
           JOB_ID="${{ inputs.job_id }}"
-
-          # Priority 1: designated output path
-          IDL="anchor-project/target/idl/${PROG}.json"
-
-          # Priority 2: look for idl.json in cargo build output dirs
-          if [ ! -f "$IDL" ]; then
-            FOUND=$(find anchor-project/target/debug/build -name "idl.json" 2>/dev/null | head -1)
-            if [ -n "$FOUND" ]; then IDL="$FOUND"; fi
-          fi
-
-          # Priority 3: any JSON with 'instructions' array (anchor IDL signature)
-          if [ ! -f "$IDL" ] || ! python3 -c "import json; d=json.load(open('$IDL')); exit(0 if 'instructions' in d else 1)" 2>/dev/null; then
-            echo "Searching for anchor IDL by content..."
-            for f in $(find anchor-project/target -name "*.json" 2>/dev/null | grep -v "rustc_info|fingerprint|CACHEDIR|incremental"); do
-              if python3 -c "import json; d=json.load(open('$f')); exit(0 if 'instructions' in d else 1)" 2>/dev/null; then
-                IDL="$f"
-                echo "Found by content: $IDL"
-                break
-              fi
-            done
-          fi
-
-          if [ ! -f "$IDL" ]; then
-            echo "ERROR: No anchor IDL found"
-            echo "All JSON files:"
-            find anchor-project/target -name "*.json" 2>/dev/null | grep -v "rustc_info|fingerprint|CACHEDIR|incremental" | head -30
+          
+          IDL=$(find anchor-project/target/idl -name "*.json" 2>/dev/null | head -1)
+          if [ -z "$IDL" ]; then
+            echo "ERROR: No IDL in target/idl"
+            find anchor-project/target -name "*.json" 2>/dev/null | grep -v "rustc_info|fingerprint|CACHEDIR|incremental" | head -20
             exit 1
           fi
-
-          echo "Using IDL: $IDL"
-          cat "$IDL"
+          
+          echo "Found IDL: $IDL"
+          python3 -c "import json,sys; d=json.load(open('$IDL')); print('Valid JSON, keys:', list(d.keys())[:5])"
           mkdir -p outputs
           cp "$IDL" "outputs/$JOB_ID.json"
 
