@@ -82,15 +82,29 @@ jobs:
           tar xjf /tmp/solana.tar.bz2 -C "${{ env.SOLANA_INSTALL_DIR }}"
           ln -sfn "${{ env.SOLANA_INSTALL_DIR }}/solana-release" "${{ env.SOLANA_INSTALL_DIR }}/active_release"
 
-      - name: Add Solana to PATH
+      - name: Add Solana to PATH and upgrade platform-tools cargo
         run: |
           echo "${{ env.SOLANA_BIN }}" >> "$GITHUB_PATH"
           "${{ env.SOLANA_BIN }}/solana" --version
-          # Show bundled cargo version (should be >= 1.85 for edition2024 support)
-          PLATFORM_TOOLS="${{ env.SOLANA_BIN }}/sdk/sbf/dependencies/platform-tools"
-          if [ -f "${PLATFORM_TOOLS}/rust/bin/cargo" ]; then
-            "${PLATFORM_TOOLS}/rust/bin/cargo" --version || true
-          fi
+          
+          # Solana bundled platform-tools cargo may be too old for edition2024 (>=1.85 required)
+          # Replace with host cargo if bundled is older
+          HOST_CARGO=$(which cargo)
+          HOST_CARGO_VER=$(cargo --version)
+          echo "Host cargo: $HOST_CARGO_VER"
+          
+          # Find all bundled cargo binaries in Solana's SDK and replace with host cargo
+          for BUNDLED_CARGO in \
+            "${{ env.SOLANA_BIN }}/sdk/sbf/dependencies/platform-tools/rust/bin/cargo" \
+            "${{ env.SOLANA_BIN }}/sdk/bpf/dependencies/bpf-tools/rust/bin/cargo"; do
+            if [ -f "$BUNDLED_CARGO" ]; then
+              BUNDLED_VER=$("$BUNDLED_CARGO" --version 2>/dev/null || echo "unknown")
+              echo "Bundled cargo at $BUNDLED_CARGO: $BUNDLED_VER"
+              # Replace with host cargo to get edition2024 support
+              cp "$HOST_CARGO" "$BUNDLED_CARGO"
+              echo "Replaced with host cargo: $("$BUNDLED_CARGO" --version)"
+            fi
+          done
 
       - name: Solana keygen
         run: |
