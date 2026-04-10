@@ -139,45 +139,44 @@ jobs:
             echo "Found: $f ($($f --version 2>/dev/null || echo error))"
           done
 
-      - name: Replace platform-tools cargo with host cargo 1.94
+      - name: Replace platform-tools cargo AND rustc with host toolchain
         run: |
-          PT_CARGO=$(find ~/.cache/solana -name "cargo" -path "*/rust/bin/cargo" -type f 2>/dev/null | head -1)
           STABLE_TC=$(ls ~/.rustup/toolchains/ 2>/dev/null | grep "^stable-" | head -1)
           REAL_CARGO="$HOME/.rustup/toolchains/${STABLE_TC}/bin/cargo"
-          if [ -z "$PT_CARGO" ]; then
-            echo "ERROR: Platform-tools cargo not found"
+          REAL_RUSTC="$HOME/.rustup/toolchains/${STABLE_TC}/bin/rustc"
+          PT_DIR=$(find ~/.cache/solana -name "cargo" -path "*/rust/bin/cargo" -type f 2>/dev/null | head -1 | xargs dirname 2>/dev/null)
+          if [ -z "$PT_DIR" ]; then
+            echo "ERROR: Platform-tools rust/bin/ not found"
             exit 1
           fi
-          echo "Bundled version: $($PT_CARGO --version)"
-          echo "Host cargo: $REAL_CARGO ($($REAL_CARGO --version))"
-          cp "$REAL_CARGO" "$PT_CARGO"
-          echo "Upgraded to: $($PT_CARGO --version)"
+          echo "Platform-tools dir: $PT_DIR"
+          echo "Host cargo: $($REAL_CARGO --version)"
+          echo "Host rustc: $($REAL_RUSTC --version)"
+          echo "PT cargo before: $($PT_DIR/cargo --version)"
+          echo "PT rustc before: $($PT_DIR/rustc --version)"
+          cp "$REAL_CARGO" "$PT_DIR/cargo"
+          cp "$REAL_RUSTC" "$PT_DIR/rustc"
+          echo "PT cargo after: $($PT_DIR/cargo --version)"
+          echo "PT rustc after: $($PT_DIR/rustc --version)"
 
       - name: Pin packages to pre-edition2024 versions
         working-directory: anchor-project
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
           mkdir -p .cargo ~/.cargo
-          # STEP 1: Use MSRV-aware resolver (fallback) during lockfile generation
-          # Workspace rust-version = "1.84" so resolver avoids packages with rust-version > 1.84
-          # This handles sha2/digest/crypto-common/block-buffer chains (they declare rust-version 1.85)
+          # MSRV-aware resolver: workspace rust-version = "1.84" avoids packages with rust-version > 1.84
           echo "[resolver]" > .cargo/config.toml
           echo 'incompatible-rust-versions = "fallback"' >> .cargo/config.toml
-          # Remove Cargo.lock from Prime step (not MSRV-aware)
           rm -f Cargo.lock
           echo "=== Generating MSRV-aware lockfile (workspace rust-version = 1.84) ==="
           cargo generate-lockfile 2>&1 | head -10 || true
-          # STEP 2: hybrid-array 0.4.x also requires rustc 1.85 but "fallback" could not avoid it
-          # (no older 0.4.x version with rust-version < 1.85 available for the ^0.4 constraint)
-          # Solution: pass CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=allow to the build step
-          # to suppress the pre-compile MSRV check. The actual source code compiles fine with 1.84.
-          # Switch config to allow (suppresses the check in case env var isn't inherited)
+          # Switch to allow after resolution (suppress MSRV compile-time check for remaining edge cases)
           echo "[resolver]" > .cargo/config.toml
           echo 'incompatible-rust-versions = "allow"' >> .cargo/config.toml
           echo "[resolver]" > ~/.cargo/config.toml
           echo 'incompatible-rust-versions = "allow"' >> ~/.cargo/config.toml
           echo "=== Verifying selected versions ==="
-          for PKG in proc-macro-crate toml_edit indexmap hashbrown digest crypto-common block-buffer sha2 sha3 hmac keccak hybrid-array; do
+          for PKG in proc-macro-crate toml_edit indexmap hashbrown digest crypto-common block-buffer sha2 sha3 hmac keccak hybrid-array cmov constant_time_eq ctutils; do
             VERS=$(grep -A3 "^name = \"$PKG\"" Cargo.lock | grep "^version" | awk '{print $3}' | tr -d '"' | tr '\n' ' ') || true
             echo "$PKG: ${VERS:-not found}"
           done || true
@@ -189,9 +188,11 @@ jobs:
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
           PT_CARGO=$(find ~/.cache/solana -name cargo -path '*/rust/bin/cargo' -type f 2>/dev/null | head -1)
-          echo "Platform-tools cargo: ${PT_CARGO:+(found at $PT_CARGO, version: $(${PT_CARGO} --version 2>/dev/null || echo unknown))}"
+          PT_RUSTC=$(find ~/.cache/solana -name rustc -path '*/rust/bin/rustc' -type f 2>/dev/null | head -1)
+          echo "Platform-tools cargo: ${PT_CARGO} → $($PT_CARGO --version 2>/dev/null)"
+          echo "Platform-tools rustc: ${PT_RUSTC} → $($PT_RUSTC --version 2>/dev/null)"
           echo "Host rustc: $(rustc --version)"
-          echo "CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: $CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS"
+          echo "CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=$CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS"
           anchor build --skip-lint 2>&1
           BUILD_EXIT=$?
           echo "Build exit code: $BUILD_EXIT"
