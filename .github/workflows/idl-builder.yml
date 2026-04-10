@@ -182,23 +182,16 @@ jobs:
             echo "ERROR: proc-macro2 build.rs not found in registry"
             exit 1
           fi
-          echo "=== Before patch (semver lines) ==="
+          echo "=== Before patch ==="
           grep -n "semver_exempt" "$PM2_BUILD"
-          python3 -c "
-import re, sys
-path = sys.argv[1]
-with open(path, 'r') as f:
-    content = f.read()
-patched = re.sub(
-    r'let semver_exempt = .*?;',
-    'let semver_exempt = true; // patched for Anchor IDL build',
-    content,
-    count=1
-)
-with open(path, 'w') as f:
-    f.write(patched)
-print('Patch applied')
-" "$PM2_BUILD"
+          node -e '
+            const fs = require("fs");
+            const path = process.argv[1];
+            let content = fs.readFileSync(path, "utf8");
+            content = content.replace(/let semver_exempt = .*?;/, "let semver_exempt = true; // patched");
+            fs.writeFileSync(path, content);
+            console.log("Patch applied");
+          ' "$PM2_BUILD"
           echo "=== After patch ==="
           grep -n "semver_exempt" "$PM2_BUILD"
 
