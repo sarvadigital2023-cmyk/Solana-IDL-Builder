@@ -182,17 +182,32 @@ jobs:
             echo "  $PKG: ${VERS:-not found}"
           done
 
+      - name: Patch proc-macro2 build.rs to always enable procmacro2_semver_exempt
+        run: |
+          PM2_DIR=$(find ~/.cargo/registry/src -name "build.rs" -path "*proc-macro2-*" 2>/dev/null | head -1 | xargs -I{} dirname {})
+          if [ -z "$PM2_DIR" ]; then
+            echo "proc-macro2 not in registry yet; downloading via cargo fetch"
+            cd anchor-project && cargo fetch 2>&1 | tail -5
+            PM2_DIR=$(find ~/.cargo/registry/src -name "build.rs" -path "*proc-macro2-*" 2>/dev/null | head -1 | xargs -I{} dirname {})
+          fi
+          echo "proc-macro2 dir: $PM2_DIR"
+          ls "$PM2_DIR" 2>/dev/null | head -5
+          BUILD_RS="$PM2_DIR/build.rs"
+          PM2_VER=$(echo "$PM2_DIR" | grep -oP 'proc-macro2-[\d.]+' | head -1)
+          echo "Patching $PM2_VER: $BUILD_RS"
+          sed -i 's/let semver_exempt = cfg!(procmacro2_semver_exempt) || docs_rs;/let semver_exempt = true; \/\/ always enable (patched for Anchor\/Solana build)/' "$BUILD_RS"
+          echo "Patch applied. Verifying:"
+          grep "semver_exempt" "$BUILD_RS" | head -3
+
       - name: Build Anchor project
         working-directory: anchor-project
         env:
           CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: allow
-          RUSTFLAGS: "--cfg procmacro2_semver_exempt"
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
           PT_CARGO=$(find ~/.cache/solana -name cargo -path '*/rust/bin/cargo' -type f 2>/dev/null | head -1)
           echo "PT cargo: $($PT_CARGO --version 2>/dev/null)"
           echo "Host rustc: $(rustc --version)"
-          echo "RUSTFLAGS=$RUSTFLAGS"
           anchor build --skip-lint 2>&1
           BUILD_EXIT=$?
           echo "Build exit code: $BUILD_EXIT"
