@@ -130,7 +130,7 @@ jobs:
           if [ -z "$IDL" ]; then echo "No IDL in project/target/idl/" && exit 1; fi
           mkdir -p outputs
           cp "$IDL" "outputs/${{ inputs.job_id }}.json"
-          echo "IDL saved: $(cat outputs/${{ inputs.job_id }}.json | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d.get('metadata',{}).get('name','?'), len(d.get('instructions',[])), 'instructions')\")"
+          echo "IDL saved: $(wc -c < outputs/${{ inputs.job_id }}.json) bytes"
 
       - name: Commit IDL
         run: |
