@@ -159,20 +159,24 @@ jobs:
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
           mkdir -p .cargo ~/.cargo
           # STEP 1: Use MSRV-aware resolver (fallback) during lockfile generation
-          # Workspace declares rust-version = "1.84" so resolver avoids edition2024 packages
-          # (edition2024 packages declare rust-version = "1.85" which is > 1.84)
+          # Workspace rust-version = "1.84" so resolver avoids packages with rust-version > 1.84
+          # This handles sha2/digest/crypto-common/block-buffer chains (they declare rust-version 1.85)
           echo "[resolver]" > .cargo/config.toml
           echo 'incompatible-rust-versions = "fallback"' >> .cargo/config.toml
-          # Remove Cargo.lock from Prime step (generated without MSRV-aware resolver)
+          # Remove Cargo.lock from Prime step (not MSRV-aware)
           rm -f Cargo.lock
           echo "=== Generating MSRV-aware lockfile (workspace rust-version = 1.84) ==="
           cargo generate-lockfile 2>&1 | head -10 || true
-          # STEP 2: Switch to allow for Build step (suppress pre-compile MSRV check)
+          # STEP 2: hybrid-array 0.4.x also requires rustc 1.85 but "fallback" could not avoid it
+          # (no older 0.4.x version with rust-version < 1.85 available for the ^0.4 constraint)
+          # Solution: pass CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=allow to the build step
+          # to suppress the pre-compile MSRV check. The actual source code compiles fine with 1.84.
+          # Switch config to allow (suppresses the check in case env var isn't inherited)
           echo "[resolver]" > .cargo/config.toml
           echo 'incompatible-rust-versions = "allow"' >> .cargo/config.toml
           echo "[resolver]" > ~/.cargo/config.toml
           echo 'incompatible-rust-versions = "allow"' >> ~/.cargo/config.toml
-          echo "=== Verifying versions (should all be pre-edition2024) ==="
+          echo "=== Verifying selected versions ==="
           for PKG in proc-macro-crate toml_edit indexmap hashbrown digest crypto-common block-buffer sha2 sha3 hmac keccak hybrid-array; do
             VERS=$(grep -A3 "^name = \"$PKG\"" Cargo.lock | grep "^version" | awk '{print $3}' | tr -d '"' | tr '\n' ' ') || true
             echo "$PKG: ${VERS:-not found}"
@@ -180,10 +184,14 @@ jobs:
 
       - name: Build Anchor project
         working-directory: anchor-project
+        env:
+          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: allow
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
-          echo "Platform-tools cargo: $(find ~/.cache/solana -name cargo -path '*/rust/bin/cargo' -type f 2>/dev/null | head -1 | xargs -I{} {} --version 2>/dev/null)"
-          echo "Rust: $(rustc --version)"
+          PT_CARGO=$(find ~/.cache/solana -name cargo -path '*/rust/bin/cargo' -type f 2>/dev/null | head -1)
+          echo "Platform-tools cargo: ${PT_CARGO:+(found at $PT_CARGO, version: $(${PT_CARGO} --version 2>/dev/null || echo unknown))}"
+          echo "Host rustc: $(rustc --version)"
+          echo "CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: $CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS"
           anchor build --skip-lint 2>&1
           BUILD_EXIT=$?
           echo "Build exit code: $BUILD_EXIT"
