@@ -174,26 +174,28 @@ jobs:
           echo "=== Fetching registry sources ==="
           cargo fetch 2>&1 | tail -3
 
-      - name: Patch proc-macro2 build.rs to always enable procmacro2_semver_exempt
+      - name: Patch proc-macro2 build.rs to always enable semver_exempt and proc_macro_span
         run: |
           PM2_BUILD=$(find ~/.cargo/registry/src -name "build.rs" -path "*proc-macro2-*" -type f 2>/dev/null | head -1)
           echo "proc-macro2 build.rs: $PM2_BUILD"
           if [ -z "$PM2_BUILD" ]; then
-            echo "ERROR: proc-macro2 build.rs not found in registry"
+            echo "ERROR: proc-macro2 build.rs not found"
             exit 1
           fi
           echo "=== Before patch ==="
-          grep -n "semver_exempt" "$PM2_BUILD"
+          grep -n "semver_exempt\|proc_macro_span" "$PM2_BUILD" | head -10
           node -e '
             const fs = require("fs");
             const path = process.argv[1];
-            let content = fs.readFileSync(path, "utf8");
-            content = content.replace(/let semver_exempt = .*?;/, "let semver_exempt = true; // patched");
-            fs.writeFileSync(path, content);
+            let c = fs.readFileSync(path, "utf8");
+            c = c.replace(/let semver_exempt = .*?;/, "let semver_exempt = true; // patched");
+            c = c.replace(/let proc_macro_span;/, "let proc_macro_span;");
+            c = c.replace(/if compile_probe\(false\) \{[\s\S]*?consider_rustc_bootstrap = false;\s*\} else/, "if true { proc_macro_span = true; consider_rustc_bootstrap = false; } else if false");
+            fs.writeFileSync(path, c);
             console.log("Patch applied");
           ' "$PM2_BUILD"
           echo "=== After patch ==="
-          grep -n "semver_exempt" "$PM2_BUILD"
+          grep -n "semver_exempt\|proc_macro_span\|compile_probe\|if true" "$PM2_BUILD" | head -15
 
       - name: Build Anchor project
         working-directory: anchor-project
