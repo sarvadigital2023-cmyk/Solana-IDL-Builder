@@ -3,238 +3,170 @@ on:
   workflow_dispatch:
     inputs:
       job_id:
-        description: Job ID for tracking
         required: true
         type: string
 
 env:
   SOLANA_VERSION: "2.3.1"
-  SOLANA_INSTALL_DIR: /home/runner/.local/share/solana/install
-  SOLANA_BIN: /home/runner/.local/share/solana/install/active_release/bin
 
 jobs:
-  generate-idl:
+  build-idl:
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Verify lib.rs
+      - name: Check input
         run: |
-          FILE="inputs/${{ inputs.job_id }}/lib.rs"
-          if [ ! -f "$FILE" ]; then
-            echo "ERROR: lib.rs not found at $FILE"
+          if [ ! -f "inputs/${{ inputs.job_id }}/lib.rs" ]; then
+            echo "ERROR: inputs/${{ inputs.job_id }}/lib.rs not found"
             exit 1
           fi
-          echo "lib.rs found: $(wc -c < $FILE) bytes"
-          cp "$FILE" /tmp/lib.rs
+          cp "inputs/${{ inputs.job_id }}/lib.rs" /tmp/lib.rs
 
-      - name: Install system deps
-        run: sudo apt-get update -qq && sudo apt-get install -y pkg-config build-essential libudev-dev libssl-dev curl bzip2
+      - name: System dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y pkg-config build-essential libudev-dev libssl-dev
 
-      - name: Setup Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache Cargo registry
+      - name: Cache
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-registry-anchor0301-stable-${{ runner.os }}-v4
+            ~/.cargo/bin/anchor
+            ~/.local/share/solana
+            ~/.cache/solana
+          key: solana-anchor-${{ runner.os }}-v1
 
-      - name: Cache Anchor CLI binary
-        id: cache-anchor
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/anchor
-          key: anchor-bin-0.30.1-stable-${{ runner.os }}-v6
-
-      - name: Install Anchor CLI 0.30.1
-        if: steps.cache-anchor.outputs.cache-hit != 'true'
+      - name: Install Anchor CLI
         run: |
-          cargo install anchor-cli --version "=0.30.1" --force
+          if [ ! -f ~/.cargo/bin/anchor ]; then
+            cargo install anchor-cli --version "=0.30.1"
+          fi
           anchor --version
 
-      - name: Verify Anchor version
-        run: anchor --version
-
-      - name: Cache Solana and platform-tools
-        id: cache-solana
-        uses: actions/cache@v4
-        with:
-          path: |
-            ${{ env.SOLANA_INSTALL_DIR }}
-            ~/.cache/solana
-          key: solana-${{ env.SOLANA_VERSION }}-${{ runner.os }}-v2
-
-      - name: Install Solana ${{ env.SOLANA_VERSION }}
-        if: steps.cache-solana.outputs.cache-hit != 'true'
+      - name: Install Solana
         run: |
-          TARBALL="solana-release-x86_64-unknown-linux-gnu.tar.bz2"
-          mkdir -p "${{ env.SOLANA_INSTALL_DIR }}"
-          curl -L --retry 5 --retry-delay 10 --retry-connrefused \
-            "https://github.com/anza-xyz/agave/releases/download/v${{ env.SOLANA_VERSION }}/${TARBALL}" \
-            -o /tmp/solana.tar.bz2
-          tar xjf /tmp/solana.tar.bz2 -C "${{ env.SOLANA_INSTALL_DIR }}"
-          ln -sfn "${{ env.SOLANA_INSTALL_DIR }}/solana-release" "${{ env.SOLANA_INSTALL_DIR }}/active_release"
-
-      - name: Add Solana to PATH
-        run: |
-          echo "${{ env.SOLANA_BIN }}" >> "$GITHUB_PATH"
-          "${{ env.SOLANA_BIN }}/solana" --version
+          if [ ! -f ~/.local/share/solana/install/active_release/bin/solana ]; then
+            curl -L "https://github.com/anza-xyz/agave/releases/download/v${SOLANA_VERSION}/solana-release-x86_64-unknown-linux-gnu.tar.bz2" -o /tmp/solana.tar.bz2
+            mkdir -p ~/.local/share/solana/install
+            tar xjf /tmp/solana.tar.bz2 -C ~/.local/share/solana/install
+            ln -sfn ~/.local/share/solana/install/solana-release ~/.local/share/solana/install/active_release
+          fi
+          echo ~/.local/share/solana/install/active_release/bin >> $GITHUB_PATH
 
       - name: Solana keygen
         run: |
           mkdir -p ~/.config/solana
           solana-keygen new --no-bip39-passphrase -o ~/.config/solana/id.json --force
 
-      - name: Setup Anchor project from template
+      - name: Create Anchor project
         run: |
-          export PATH="${{ env.SOLANA_BIN }}:$PATH"
-          PROG=$(grep -oP 'pub mod \K\w+' /tmp/lib.rs | head -1 || echo deployer)
-          echo "Program name: $PROG"
-          RAW_ADDR=$(grep -oP '(?<=declare_id!\(")[^"]+' /tmp/lib.rs 2>/dev/null | head -1 || true)
-          echo "Raw address: $RAW_ADDR"
-          if python3 scripts/check_b58.py "$RAW_ADDR" 2>&1; then
-            ADDR="$RAW_ADDR"
-          else
-            echo "Invalid Base58 — generating fresh keypair..."
-            TMP_KEY=/tmp/idl-build-key.json
-            solana-keygen new --no-bip39-passphrase -o "$TMP_KEY" --force
-            ADDR=$(solana-keygen pubkey "$TMP_KEY")
-            echo "Generated: $ADDR"
+          PROG=$(grep -oP 'pub mod \K\w+' /tmp/lib.rs | head -1 || echo "deployer")
+          ADDR=$(grep -oP '(?<=declare_id!\(")[^"]+' /tmp/lib.rs | head -1 || true)
+          if [ -z "$ADDR" ] || [ ${#ADDR} -lt 32 ]; then
+            solana-keygen new --no-bip39-passphrase -o /tmp/prog.json --force
+            ADDR=$(solana-keygen pubkey /tmp/prog.json)
+            sed -i "s/declare_id!.*$/declare_id!(\"$ADDR\");/" /tmp/lib.rs
           fi
-          echo "Using address: $ADDR"
-          mkdir -p anchor-project/programs/deployer/src
-          cp /tmp/lib.rs anchor-project/programs/deployer/src/lib.rs
-          cp template/Cargo.toml anchor-project/Cargo.toml
-          sed "s/{{PROG_NAME}}/$PROG/g; s/{{PROG_ADDR}}/$ADDR/g" \
-            template/programs/deployer/Cargo.toml.tpl > anchor-project/programs/deployer/Cargo.toml
-          sed "s/{{PROG_NAME}}/$PROG/g; s/{{PROG_ADDR}}/$ADDR/g" \
-            template/Anchor.toml.tpl > anchor-project/Anchor.toml
-          if [ "$ADDR" != "$RAW_ADDR" ]; then
-            python3 scripts/patch_declare_id.py anchor-project/programs/deployer/src/lib.rs "$ADDR"
-          fi
-          echo "=== declare_id ===" && grep "declare_id" anchor-project/programs/deployer/src/lib.rs
-          echo "PROG=$PROG" >> "$GITHUB_ENV"
-          echo "PROG_ADDR=$ADDR" >> "$GITHUB_ENV"
+          mkdir -p project/programs/$PROG/src
+          cp /tmp/lib.rs project/programs/$PROG/src/lib.rs
+          cat > project/Cargo.toml << EOF
+          [workspace]
+          members = ["programs/$PROG"]
+          resolver = "2"
+          [workspace.package]
+          version = "0.1.0"
+          edition = "2021"
+          rust-version = "1.84"
+          EOF
+          cat > project/programs/$PROG/Cargo.toml << EOF
+          [package]
+          name = "$PROG"
+          version.workspace = true
+          edition.workspace = true
+          [lib]
+          crate-type = ["cdylib", "lib"]
+          name = "$PROG"
+          [features]
+          default = []
+          idl-build = ["anchor-lang/idl-build"]
+          [dependencies]
+          anchor-lang = { version = "0.30.1", features = ["init-if-needed"] }
+          EOF
+          cat > project/Anchor.toml << EOF
+          [toolchain]
+          anchor_version = "0.30.1"
+          [features]
+          resolution = true
+          [programs.localnet]
+          $PROG = "$ADDR"
+          [registry]
+          url = "https://api.apr.dev"
+          [provider]
+          cluster = "Localnet"
+          wallet = "~/.config/solana/id.json"
+          [scripts]
+          test = "echo 'no tests'"
+          EOF
+          echo "PROG=$PROG" >> $GITHUB_ENV
 
-      - name: Prime platform-tools download
-        working-directory: anchor-project
-        run: |
-          export PATH="${{ env.SOLANA_BIN }}:$PATH"
-          PT_CHECK=$(find ~/.cache/solana -name "cargo" -path "*/rust/bin/cargo" -type f 2>/dev/null | head -1)
-          if [ -n "$PT_CHECK" ]; then
-            echo "Platform-tools already cached: $($PT_CHECK --version)"
-            exit 0
-          fi
-          echo "Triggering platform-tools download via anchor build..."
-          anchor build --skip-lint 2>&1 || true
-          find ~/.cache/solana -name "cargo" -path "*/rust/bin/cargo" -type f 2>/dev/null | while read f; do
-            echo "Found: $f ($($f --version 2>/dev/null || echo error))"
-          done
+      - name: Download platform-tools
+        working-directory: project
+        run: anchor build --skip-lint 2>&1 || true
 
-      - name: Replace platform-tools cargo with host cargo 1.94
+      - name: Use host cargo (fixes edition 2024)
         run: |
-          PT_CARGO=$(find ~/.cache/solana -name "cargo" -path "*/rust/bin/cargo" -type f 2>/dev/null | head -1)
-          STABLE_TC=$(ls ~/.rustup/toolchains/ 2>/dev/null | grep "^stable-" | head -1)
-          REAL_CARGO="$HOME/.rustup/toolchains/${STABLE_TC}/bin/cargo"
-          if [ -z "$PT_CARGO" ]; then
-            echo "ERROR: Platform-tools cargo not found"
-            exit 1
-          fi
-          echo "Bundled cargo: $($PT_CARGO --version)"
-          echo "Host cargo: $REAL_CARGO ($($REAL_CARGO --version))"
-          cp "$REAL_CARGO" "$PT_CARGO"
-          echo "Upgraded cargo to: $($PT_CARGO --version)"
+          PT=$(find ~/.cache/solana -name cargo -path '*/rust/bin/cargo' -type f | head -1)
+          HC=$(find ~/.rustup/toolchains -name cargo -path '*/bin/cargo' -type f | grep stable | head -1)
+          [ -n "$PT" ] && [ -n "$HC" ] && cp "$HC" "$PT" && echo "Replaced $PT with $HC"
 
-      - name: Pin dependencies and fetch to registry
-        working-directory: anchor-project
+      - name: Pin MSRV-incompatible deps
+        working-directory: project
         run: |
-          export PATH="${{ env.SOLANA_BIN }}:$PATH"
-          mkdir -p .cargo ~/.cargo
-          echo "[resolver]" > .cargo/config.toml
+          mkdir -p .cargo
+          echo '[resolver]' > .cargo/config.toml
           echo 'incompatible-rust-versions = "allow"' >> .cargo/config.toml
-          echo "[resolver]" > ~/.cargo/config.toml
-          echo 'incompatible-rust-versions = "allow"' >> ~/.cargo/config.toml
           rm -f Cargo.lock
-          cargo generate-lockfile 2>&1 | head -5 || true
-          echo "=== Pinning packages ==="
-          cargo update blake3 --precise 1.7.0 2>&1 && echo "blake3 1.7.0 OK" || (cargo update blake3 --precise 1.7.1 2>&1 && echo "blake3 1.7.1 OK" || echo "WARN: blake3 pin failed")
-          cargo update sha3@0.10.8 --precise 0.10.7 2>&1 && echo "sha3 0.10.7 OK" || echo "WARN: sha3 pin failed"
-          cargo update hashbrown@0.17.0 --precise 0.16.1 2>&1 && echo "hashbrown 0.16.1 OK" || (cargo update hashbrown@0.17.0 --precise 0.15.2 2>&1 && echo "hashbrown 0.15.2 OK" || echo "WARN: hashbrown pin failed")
-          cargo update indexmap@2.14.0 --precise 2.13.1 2>&1 && echo "indexmap 2.13.1 OK" || (cargo update indexmap@2.14.0 --precise 2.12.0 2>&1 && echo "indexmap 2.12.0 OK" || echo "WARN: indexmap pin failed")
-          cargo update unicode-segmentation@1.13.2 --precise 1.12.0 2>&1 && echo "unicode-segmentation 1.12.0 OK" || echo "WARN: unicode-segmentation pin failed"
-          cargo update proc-macro-crate@3.5.0 --precise 3.2.0 2>&1 && echo "proc-macro-crate 3.2.0 OK" || echo "WARN: proc-macro-crate 3.2.0 pin failed"
-          echo "=== Fetching registry sources ==="
+          cargo generate-lockfile 2>&1 || true
+          cargo update blake3 --precise 1.7.0 2>&1 || cargo update blake3 --precise 1.7.1 2>&1 || true
+          cargo update sha3@0.10.8 --precise 0.10.7 2>&1 || true
+          cargo update indexmap@2.14.0 --precise 2.13.1 2>&1 || true
+          cargo update unicode-segmentation@1.13.2 --precise 1.12.0 2>&1 || true
+          cargo update proc-macro-crate@3.5.0 --precise 3.2.0 2>&1 || true
           cargo fetch 2>&1 | tail -3
 
-      - name: Patch anchor-syn to disable source_file() usage
+      - name: Patch anchor-syn (disable broken source_file call)
         run: |
-          ANCHOR_SYN=$(find ~/.cargo/registry/src -name "defined.rs" -path "*anchor-syn-*" -type f 2>/dev/null | head -1)
-          echo "anchor-syn defined.rs: $ANCHOR_SYN"
-          if [ -z "$ANCHOR_SYN" ]; then
-            echo "ERROR: anchor-syn defined.rs not found"
-            exit 1
-          fi
-          echo "=== Before patch ==="
-          grep -n "procmacro2_semver_exempt\|source_file" "$ANCHOR_SYN" | head -5
-          node -e '
-            const fs = require("fs");
-            const path = process.argv[1];
-            let c = fs.readFileSync(path, "utf8");
-            const before = c;
-            c = c.replace(/#\[cfg\(procmacro2_semver_exempt\)\]/g, "#[cfg(procmacro2_semver_exempt_disabled)]");
-            if (c === before) {
-              console.log("WARN: pattern not found");
-            } else {
-              console.log("Patch applied: disabled procmacro2_semver_exempt block");
-            }
-            fs.writeFileSync(path, c);
-          ' "$ANCHOR_SYN"
-          echo "=== After patch ==="
-          grep -n "procmacro2_semver_exempt\|source_file" "$ANCHOR_SYN" | head -5
+          F=$(find ~/.cargo/registry/src -name "defined.rs" -path "*anchor-syn*" | head -1)
+          [ -z "$F" ] && echo "anchor-syn not found" && exit 1
+          sed -i 's/#\[cfg(procmacro2_semver_exempt)\]/#[cfg(procmacro2_semver_exempt_disabled)]/g' "$F"
+          echo "Patched: $F"
 
-      - name: Build Anchor project
-        working-directory: anchor-project
+      - name: Build
+        working-directory: project
         env:
           CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: allow
-        run: |
-          export PATH="${{ env.SOLANA_BIN }}:$PATH"
-          PT_CARGO=$(find ~/.cache/solana -name cargo -path '*/rust/bin/cargo' -type f 2>/dev/null | head -1)
-          echo "PT cargo: $($PT_CARGO --version 2>/dev/null)"
-          echo "Host rustc: $(rustc --version)"
-          anchor build --skip-lint 2>&1
-          BUILD_EXIT=$?
-          echo "Build exit code: $BUILD_EXIT"
-          ls -la target/idl/ 2>/dev/null || echo "no target/idl"
-          exit $BUILD_EXIT
+        run: anchor build --skip-lint
 
-      - name: Save IDL output
+      - name: Save IDL
         run: |
-          JOB_ID="${{ inputs.job_id }}"
-          IDL=$(find anchor-project/target/idl -name "*.json" 2>/dev/null | head -1)
-          if [ -z "$IDL" ]; then
-            echo "ERROR: No IDL in target/idl"
-            exit 1
-          fi
-          echo "Found IDL: $IDL"
-          node -e "const f=require('fs'); const d=JSON.parse(f.readFileSync('$IDL')); console.log('Valid JSON, keys:', Object.keys(d).slice(0,5).join(','))"
+          IDL=$(find project/target/idl -name "*.json" | head -1)
+          [ -z "$IDL" ] && echo "No IDL found" && exit 1
           mkdir -p outputs
-          cp "$IDL" "outputs/$JOB_ID.json"
+          cp "$IDL" "outputs/${{ inputs.job_id }}.json"
+          echo "IDL saved: $(cat outputs/${{ inputs.job_id }}.json | head -c 200)"
 
-      - name: Commit IDL output
-        env:
-          JOB_ID: ${{ inputs.job_id }}
+      - name: Commit IDL
         run: |
           git pull --rebase origin main || true
-          git add "outputs/$JOB_ID.json"
+          git add "outputs/${{ inputs.job_id }}.json"
           git -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
               -c user.name="github-actions[bot]" \
-              commit -m "IDL output for $JOB_ID"
+              commit -m "IDL for ${{ inputs.job_id }}"
           git push
