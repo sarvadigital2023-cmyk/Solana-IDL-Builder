@@ -78,6 +78,9 @@ jobs:
           txt = re.sub(r'declare_id!\(\"[^\"]*\"\)', 'declare_id!(\"' + sys.argv[1] + '\")', txt)
           # spl-token-2022 v3+: TransferHook.program_id is OptionalNonZeroPubkey, not Pubkey
           txt = txt.replace('hook.program_id.into()', 'hook.program_id.0')
+          # anchor-spl 0.30.1: mint_to_checked/MintToChecked renamed to mint_to/MintTo
+          txt = txt.replace('token_2022::MintToChecked', 'token_2022::MintTo')
+          txt = txt.replace('token_2022::mint_to_checked', 'token_2022::mint_to')
           open('/tmp/lib.rs','w').write(txt)
           " "$ADDR"
           mkdir -p project/programs/$PROG/src
