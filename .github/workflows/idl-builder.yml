@@ -134,16 +134,16 @@ jobs:
         working-directory: anchor-project
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
-          
+
           PT_CHECK=$(find ~/.cache/solana -name "cargo" -path "*/rust/bin/cargo" -type f 2>/dev/null | head -1)
           if [ -n "$PT_CHECK" ]; then
             echo "Platform-tools already cached: $($PT_CHECK --version)"
             exit 0
           fi
-          
+
           echo "Triggering platform-tools download via anchor build..."
           anchor build --skip-lint 2>&1 || true
-          
+
           find ~/.cache/solana -name "cargo" -path "*/rust/bin/cargo" -type f 2>/dev/null | while read f; do
             echo "Found: $f ($($f --version 2>/dev/null || echo 'error'))"
           done
@@ -153,56 +153,51 @@ jobs:
           PT_CARGO=$(find ~/.cache/solana -name "cargo" -path "*/rust/bin/cargo" -type f 2>/dev/null | head -1)
           STABLE_TC=$(ls ~/.rustup/toolchains/ 2>/dev/null | grep "^stable-" | head -1)
           REAL_CARGO="$HOME/.rustup/toolchains/${STABLE_TC}/bin/cargo"
-          
+
           if [ -z "$PT_CARGO" ]; then
             echo "ERROR: Platform-tools cargo not found"
             exit 1
           fi
-          
+
           echo "Bundled version: $($PT_CARGO --version)"
           echo "Host cargo: $REAL_CARGO ($($REAL_CARGO --version))"
           cp "$REAL_CARGO" "$PT_CARGO"
           echo "Upgraded to: $($PT_CARGO --version)"
 
-      - name: Pin edition2024 packages to Rust-1.84-compatible versions
+      - name: Pin packages to pre-edition2024 versions
         working-directory: anchor-project
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
-          
-          # Allow MSRV violations in cargo so it uses our pinned older versions
+
+          # Tell cargo to allow MSRV-incompatible packages (we pin to avoid edition2024 at compile time)
           mkdir -p .cargo
-          printf '[resolver]\nincompatible-rust-versions = "allow"\n' > .cargo/config.toml
-          
-          # Use HOST cargo (host rustc 1.94.1) to generate initial Cargo.lock
-          # This avoids MSRV failures during resolution
-          cargo generate-lockfile 2>&1 | head -5 || true
-          
-          echo "=== Pinning problematic packages to pre-edition2024 versions ==="
-          
-          # RustCrypto chain
-          cargo update digest --precise 0.10.7 2>&1 || echo "digest: pin skipped"
-          cargo update crypto-common --precise 0.1.6 2>&1 || echo "crypto-common: pin skipped"
-          cargo update block-buffer --precise 0.10.4 2>&1 || echo "block-buffer: pin skipped"
-          cargo update sha2 --precise 0.10.9 2>&1 || echo "sha2: pin skipped"
-          cargo update sha3 --precise 0.10.8 2>&1 || echo "sha3: pin skipped"
-          
-          # hashbrown and indexmap
-          cargo update hashbrown --precise 0.15.5 2>&1 || echo "hashbrown: pin skipped"
-          cargo update indexmap --precise 2.7.1 2>&1 || echo "indexmap: pin skipped"
-          
-          # toml chain
-          cargo update toml_edit --precise 0.22.22 2>&1 || echo "toml_edit: pin skipped"
-          cargo update toml_datetime --precise 0.6.8 2>&1 || echo "toml_datetime: pin skipped"
-          
-          # unicode-segmentation
-          cargo update unicode-segmentation --precise 1.12.0 2>&1 || echo "unicode-seg: pin skipped"
-          
-          # Show current versions
-          echo "=== Key packages in Cargo.lock ==="
-          for PKG in hashbrown indexmap digest crypto-common block-buffer sha2 toml_edit toml_datetime; do
-            VER=$(grep -A3 "^name = \"\$PKG\"" Cargo.lock | grep "^version" | head -1 | grep -oP '"[^"]+"')
-            echo "$PKG: $VER"
-          done
+          printf '[resolver]
+incompatible-rust-versions = "allow"
+' > .cargo/config.toml
+
+          # Generate initial Cargo.lock using HOST cargo (host rustc 1.94.1, no MSRV issues)
+          cargo generate-lockfile 2>&1 | head -3 || true
+
+          echo "=== Pinning to pre-edition2024 versions ==="
+
+          # KEY FIX: pin proc-macro-crate to 3.3.0 which uses toml_edit ^0.22 (not ^0.25)
+          # This breaks the chain: proc-macro-crate 3.5.0 -> toml_edit 0.25 -> indexmap 2.14 -> hashbrown 0.17
+          cargo update proc-macro-crate --precise 3.3.0 2>&1 || echo "WARN: proc-macro-crate pin skipped"
+
+          # RustCrypto chain: pin sha2/digest/crypto-common/block-buffer to pre-edition2024
+          cargo update sha2 --precise 0.10.9 2>&1 || echo "WARN: sha2 pin skipped"
+          cargo update digest --precise 0.10.7 2>&1 || echo "WARN: digest pin skipped"
+          cargo update crypto-common --precise 0.1.6 2>&1 || echo "WARN: crypto-common pin skipped"
+          cargo update block-buffer --precise 0.10.4 2>&1 || echo "WARN: block-buffer pin skipped"
+
+          # Other crates
+          cargo update unicode-segmentation --precise 1.12.0 2>&1 || echo "WARN: unicode-seg pin skipped"
+
+          echo "=== Verifying package versions in Cargo.lock ==="
+          for PKG in proc-macro-crate toml_edit indexmap hashbrown digest crypto-common block-buffer sha2; do
+            VERS=$(grep -A3 "^name = \"\$PKG\"" Cargo.lock | grep "^version" | grep -oP '[0-9]+\.[0-9]+\.[0-9]+[^"]*' | tr '\n' ' ')
+            echo "$PKG: ${VERS:-not found}"
+          done || true
 
       - name: Build Anchor project
         working-directory: anchor-project
@@ -210,7 +205,6 @@ jobs:
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
           echo "Platform-tools cargo: $(find ~/.cache/solana -name cargo -path '*/rust/bin/cargo' -type f 2>/dev/null | head -1 | xargs -I{} {} --version 2>/dev/null)"
           echo "Rust: $(rustc --version)"
-          echo "anchor: $(anchor --version)"
           anchor build --skip-lint 2>&1
           BUILD_EXIT=$?
           echo "Build exit code: $BUILD_EXIT"
