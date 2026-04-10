@@ -96,13 +96,10 @@ jobs:
       - name: Setup Anchor project from template
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
-
           PROG=$(grep -oP 'pub mod \K\w+' /tmp/lib.rs | head -1 || echo deployer)
           echo "Program name: $PROG"
-
           RAW_ADDR=$(grep -oP '(?<=declare_id!\(")[^"]+' /tmp/lib.rs 2>/dev/null | head -1 || true)
           echo "Raw address: $RAW_ADDR"
-
           if python3 scripts/check_b58.py "$RAW_ADDR" 2>&1; then
             ADDR="$RAW_ADDR"
           else
@@ -113,7 +110,6 @@ jobs:
             echo "Generated: $ADDR"
           fi
           echo "Using address: $ADDR"
-
           mkdir -p anchor-project/programs/deployer/src
           cp /tmp/lib.rs anchor-project/programs/deployer/src/lib.rs
           cp template/Cargo.toml anchor-project/Cargo.toml
@@ -121,11 +117,9 @@ jobs:
             template/programs/deployer/Cargo.toml.tpl > anchor-project/programs/deployer/Cargo.toml
           sed "s/{{PROG_NAME}}/$PROG/g; s/{{PROG_ADDR}}/$ADDR/g" \
             template/Anchor.toml.tpl > anchor-project/Anchor.toml
-
           if [ "$ADDR" != "$RAW_ADDR" ]; then
             python3 scripts/patch_declare_id.py anchor-project/programs/deployer/src/lib.rs "$ADDR"
           fi
-
           echo "=== declare_id ===" && grep "declare_id" anchor-project/programs/deployer/src/lib.rs
           echo "PROG=$PROG" >> "$GITHUB_ENV"
           echo "PROG_ADDR=$ADDR" >> "$GITHUB_ENV"
@@ -134,18 +128,15 @@ jobs:
         working-directory: anchor-project
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
-
           PT_CHECK=$(find ~/.cache/solana -name "cargo" -path "*/rust/bin/cargo" -type f 2>/dev/null | head -1)
           if [ -n "$PT_CHECK" ]; then
             echo "Platform-tools already cached: $($PT_CHECK --version)"
             exit 0
           fi
-
           echo "Triggering platform-tools download via anchor build..."
           anchor build --skip-lint 2>&1 || true
-
           find ~/.cache/solana -name "cargo" -path "*/rust/bin/cargo" -type f 2>/dev/null | while read f; do
-            echo "Found: $f ($($f --version 2>/dev/null || echo 'error'))"
+            echo "Found: $f ($($f --version 2>/dev/null || echo error))"
           done
 
       - name: Replace platform-tools cargo with host cargo 1.94
@@ -153,12 +144,10 @@ jobs:
           PT_CARGO=$(find ~/.cache/solana -name "cargo" -path "*/rust/bin/cargo" -type f 2>/dev/null | head -1)
           STABLE_TC=$(ls ~/.rustup/toolchains/ 2>/dev/null | grep "^stable-" | head -1)
           REAL_CARGO="$HOME/.rustup/toolchains/${STABLE_TC}/bin/cargo"
-
           if [ -z "$PT_CARGO" ]; then
             echo "ERROR: Platform-tools cargo not found"
             exit 1
           fi
-
           echo "Bundled version: $($PT_CARGO --version)"
           echo "Host cargo: $REAL_CARGO ($($REAL_CARGO --version))"
           cp "$REAL_CARGO" "$PT_CARGO"
@@ -168,34 +157,25 @@ jobs:
         working-directory: anchor-project
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
-
-          # Tell cargo to allow MSRV-incompatible packages (we pin to avoid edition2024 at compile time)
           mkdir -p .cargo
-          printf '[resolver]
-incompatible-rust-versions = "allow"
-' > .cargo/config.toml
-
-          # Generate initial Cargo.lock using HOST cargo (host rustc 1.94.1, no MSRV issues)
+          echo "[resolver]" > .cargo/config.toml
+          echo 'incompatible-rust-versions = "allow"' >> .cargo/config.toml
+          echo "=== cargo config ===" && cat .cargo/config.toml
           cargo generate-lockfile 2>&1 | head -3 || true
-
           echo "=== Pinning to pre-edition2024 versions ==="
-
-          # KEY FIX: pin proc-macro-crate to 3.3.0 which uses toml_edit ^0.22 (not ^0.25)
-          # This breaks the chain: proc-macro-crate 3.5.0 -> toml_edit 0.25 -> indexmap 2.14 -> hashbrown 0.17
+          # KEY FIX: proc-macro-crate 3.5.0 uses toml_edit ^0.25 -> edition2024 chain
+          # Pin to 3.3.0 which uses toml_edit ^0.22 (pre-edition2024)
           cargo update proc-macro-crate --precise 3.3.0 2>&1 || echo "WARN: proc-macro-crate pin skipped"
-
-          # RustCrypto chain: pin sha2/digest/crypto-common/block-buffer to pre-edition2024
+          # RustCrypto chain: sha2/digest/crypto-common/block-buffer
           cargo update sha2 --precise 0.10.9 2>&1 || echo "WARN: sha2 pin skipped"
           cargo update digest --precise 0.10.7 2>&1 || echo "WARN: digest pin skipped"
           cargo update crypto-common --precise 0.1.6 2>&1 || echo "WARN: crypto-common pin skipped"
           cargo update block-buffer --precise 0.10.4 2>&1 || echo "WARN: block-buffer pin skipped"
-
           # Other crates
           cargo update unicode-segmentation --precise 1.12.0 2>&1 || echo "WARN: unicode-seg pin skipped"
-
-          echo "=== Verifying package versions in Cargo.lock ==="
+          echo "=== Verifying pinned versions ==="
           for PKG in proc-macro-crate toml_edit indexmap hashbrown digest crypto-common block-buffer sha2; do
-            VERS=$(grep -A3 "^name = \"\$PKG\"" Cargo.lock | grep "^version" | grep -oP '[0-9]+\.[0-9]+\.[0-9]+[^"]*' | tr '\n' ' ')
+            VERS=$(grep -A3 "^name = \"$PKG\"" Cargo.lock | grep "^version" | awk '{print $3}' | tr -d '"' | tr '\n' ' ') || true
             echo "$PKG: ${VERS:-not found}"
           done || true
 
