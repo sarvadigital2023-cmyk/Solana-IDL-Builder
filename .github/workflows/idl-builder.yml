@@ -153,7 +153,7 @@ jobs:
           cp "$REAL_CARGO" "$PT_CARGO"
           echo "Upgraded cargo to: $($PT_CARGO --version)"
 
-      - name: Pin dependencies and fetch proc-macro2 to registry
+      - name: Pin dependencies and fetch to registry
         working-directory: anchor-project
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
@@ -174,39 +174,31 @@ jobs:
           echo "=== Fetching registry sources ==="
           cargo fetch 2>&1 | tail -3
 
-      - name: Patch proc-macro2 build.rs to force semver_exempt and proc_macro_span
+      - name: Patch anchor-syn to disable source_file() usage
         run: |
-          PM2_BUILD=$(find ~/.cargo/registry/src -name "build.rs" -path "*proc-macro2-*" -type f 2>/dev/null | head -1)
-          echo "proc-macro2 build.rs: $PM2_BUILD"
-          if [ -z "$PM2_BUILD" ]; then
-            echo "ERROR: proc-macro2 build.rs not found"
+          ANCHOR_SYN=$(find ~/.cargo/registry/src -name "defined.rs" -path "*anchor-syn-*" -type f 2>/dev/null | head -1)
+          echo "anchor-syn defined.rs: $ANCHOR_SYN"
+          if [ -z "$ANCHOR_SYN" ]; then
+            echo "ERROR: anchor-syn defined.rs not found"
             exit 1
           fi
           echo "=== Before patch ==="
-          grep -n "semver_exempt\|proc_macro_span\|compile_probe" "$PM2_BUILD" | head -15
+          grep -n "procmacro2_semver_exempt\|source_file" "$ANCHOR_SYN" | head -5
           node -e '
             const fs = require("fs");
             const path = process.argv[1];
             let c = fs.readFileSync(path, "utf8");
-            c = c.replace(/let semver_exempt = .*?;/, "let semver_exempt = true; // patched");
-            const BLOCK_START = "    let proc_macro_span;\n    let consider_rustc_bootstrap;";
-            const BLOCK_END = "\n    if proc_macro_span ||";
-            const start = c.indexOf(BLOCK_START);
-            const end = c.indexOf(BLOCK_END);
-            if (start < 0 || end < 0) {
-              console.log("WARN: proc_macro_span block not found (start=" + start + " end=" + end + "), trying fallback");
-              c = c.replace(/let proc_macro_span = false;/g, "let proc_macro_span = true; // forced");
-              c = c.replace(/proc_macro_span = false;/g, "proc_macro_span = true; // forced");
+            const before = c;
+            c = c.replace(/#\[cfg\(procmacro2_semver_exempt\)\]/g, "#[cfg(procmacro2_semver_exempt_disabled)]");
+            if (c === before) {
+              console.log("WARN: pattern not found");
             } else {
-              const replacement = "    let proc_macro_span = true; // forced\n    let consider_rustc_bootstrap = false; // forced";
-              c = c.substring(0, start) + replacement + c.substring(end);
-              console.log("proc_macro_span block replaced");
+              console.log("Patch applied: disabled procmacro2_semver_exempt block");
             }
             fs.writeFileSync(path, c);
-            console.log("Patch done");
-          ' "$PM2_BUILD"
+          ' "$ANCHOR_SYN"
           echo "=== After patch ==="
-          grep -n "semver_exempt\|proc_macro_span\|consider_rustc\|forced" "$PM2_BUILD" | head -20
+          grep -n "procmacro2_semver_exempt\|source_file" "$ANCHOR_SYN" | head -5
 
       - name: Build Anchor project
         working-directory: anchor-project
