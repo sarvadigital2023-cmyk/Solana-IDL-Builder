@@ -2,6 +2,9 @@
 members = ["programs/deployer"]
 resolver = "2"
 
+[workspace.package]
+rust-version = "1.84"
+
 [profile.release]
 overflow-checks = true
 lto = "fat"
