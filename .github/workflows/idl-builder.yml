@@ -158,41 +158,33 @@ jobs:
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
           mkdir -p .cargo ~/.cargo
-          # Allow incompatible rust-version during resolution to generate initial lockfile
           echo "[resolver]" > .cargo/config.toml
           echo 'incompatible-rust-versions = "allow"' >> .cargo/config.toml
           echo "[resolver]" > ~/.cargo/config.toml
           echo 'incompatible-rust-versions = "allow"' >> ~/.cargo/config.toml
           rm -f Cargo.lock
           cargo generate-lockfile 2>&1 | head -5 || true
-          echo "=== Initial versions of key packages ==="
-          for PKG in blake3 sha3 hmac digest crypto-common block-buffer cmov ctutils constant_time_eq cpufeatures hybrid-array; do
+          echo "=== Initial key versions ==="
+          for PKG in blake3 sha3 hashbrown indexmap unicode-segmentation proc-macro-crate; do
             VERS=$(grep -A3 "^name = \"$PKG\"" Cargo.lock | grep "^version" | awk '{print $3}' | tr -d '"' | tr '\n' ' ') || true
             echo "  $PKG: ${VERS:-not found}"
           done
-          echo "=== Pinning root cause: blake3 ==="
-          # blake3 1.8+ requires digest ^0.11.2 -> crypto-common 0.2.1, block-buffer 0.12.0,
-          # cmov 0.5.3, ctutils 0.4.2 (all Rust 1.85+) and constant_time_eq ^0.4.2 (Rust 1.85)
+          echo "=== Pinning root packages ==="
+          # blake3 1.8+ -> digest 0.11.2 -> crypto-common 0.2.1 -> block-buffer 0.12.0, cmov, ctutils (all Rust 1.85)
           # blake3 1.7.x uses digest ^0.10 (Rust 1.84 compatible)
-          # solana-program 1.18.26 requires blake3 ^1.5.0, so 1.7.x satisfies the constraint
-          cargo update blake3 --precise 1.7.0 2>&1
-          BLAKE3_RC=$?
-          if [ $BLAKE3_RC -eq 0 ]; then
-            echo "blake3 pinned to 1.7.0 OK"
-          else
-            echo "WARN: blake3 1.7.0 pin failed, trying 1.7.1"
-            cargo update blake3 --precise 1.7.1 2>&1 && echo "blake3 1.7.1 OK" || echo "WARN: blake3 1.7.1 also failed"
-          fi
-          echo "=== Pinning sha3 to pre-digest-0.11 version ==="
-          # sha3 0.10.8 requires digest ^0.11.2; sha3 0.10.7 uses digest ^0.10
-          # Need version specifier because there are multiple sha3 versions
-          cargo update sha3@0.10.8 --precise 0.10.7 2>&1 && echo "sha3 pinned OK" || echo "WARN: sha3 pin failed"
-          echo "=== Pinning hmac to pre-digest-0.11 version ==="
-          cargo update hmac@0.12.1 --precise 0.12.0 2>&1 && echo "hmac pinned OK" || echo "WARN: hmac pin failed"
-          echo "=== Pinning proc-macro-crate to pre-edition2024 version ==="
-          cargo update proc-macro-crate@3.5.0 --precise 3.2.0 2>&1 && echo "proc-macro-crate pinned OK" || echo "WARN: proc-macro-crate pin failed"
+          cargo update blake3 --precise 1.7.0 2>&1 && echo "blake3 1.7.0 OK" || (cargo update blake3 --precise 1.7.1 2>&1 && echo "blake3 1.7.1 OK" || echo "WARN: blake3 pin failed")
+          # sha3 0.10.8 -> digest 0.11.2; sha3 0.10.7 uses digest ^0.10
+          cargo update sha3@0.10.8 --precise 0.10.7 2>&1 && echo "sha3 0.10.7 OK" || echo "WARN: sha3 pin failed"
+          # hashbrown 0.17.0 requires Rust 1.85.0; hashbrown 0.16.x uses Rust 1.81 or earlier
+          cargo update hashbrown@0.17.0 --precise 0.16.1 2>&1 && echo "hashbrown 0.16.1 OK" || (cargo update hashbrown@0.17.0 --precise 0.15.2 2>&1 && echo "hashbrown 0.15.2 OK" || echo "WARN: hashbrown pin failed")
+          # indexmap 2.14.0 requires Rust 1.85; indexmap 2.13.x uses Rust 1.81 or earlier
+          cargo update indexmap@2.14.0 --precise 2.13.1 2>&1 && echo "indexmap 2.13.1 OK" || (cargo update indexmap@2.14.0 --precise 2.12.0 2>&1 && echo "indexmap 2.12.0 OK" || echo "WARN: indexmap pin failed")
+          # unicode-segmentation 1.13.2 requires Rust 1.85; 1.12.0 uses Rust 1.x
+          cargo update unicode-segmentation@1.13.2 --precise 1.12.0 2>&1 && echo "unicode-segmentation 1.12.0 OK" || echo "WARN: unicode-segmentation pin failed"
+          # proc-macro-crate pinning
+          cargo update proc-macro-crate@3.5.0 --precise 3.2.0 2>&1 && echo "proc-macro-crate 3.2.0 OK" || echo "WARN: proc-macro-crate pin failed"
           echo "=== Final versions ==="
-          for PKG in blake3 sha3 hmac digest crypto-common block-buffer cmov ctutils constant_time_eq cpufeatures hybrid-array proc-macro-crate; do
+          for PKG in blake3 sha3 hmac digest crypto-common block-buffer cmov ctutils constant_time_eq hashbrown indexmap unicode-segmentation proc-macro-crate; do
             VERS=$(grep -A3 "^name = \"$PKG\"" Cargo.lock | grep "^version" | awk '{print $3}' | tr -d '"' | tr '\n' ' ') || true
             echo "  $PKG: ${VERS:-not found}"
           done
@@ -206,7 +198,6 @@ jobs:
           PT_CARGO=$(find ~/.cache/solana -name cargo -path '*/rust/bin/cargo' -type f 2>/dev/null | head -1)
           echo "PT cargo: $($PT_CARGO --version 2>/dev/null)"
           echo "Host rustc: $(rustc --version)"
-          echo "CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=$CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS"
           anchor build --skip-lint 2>&1
           BUILD_EXIT=$?
           echo "Build exit code: $BUILD_EXIT"
