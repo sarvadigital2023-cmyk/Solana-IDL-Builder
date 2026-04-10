@@ -68,25 +68,70 @@ jobs:
       - name: Create Anchor project
         run: |
           PROG=$(grep -oP 'pub mod \K\w+' /tmp/lib.rs | head -1 || echo "deployer")
-          echo "Detected program name: $PROG"
+          echo "Program name: $PROG"
           solana-keygen new --no-bip39-passphrase -o /tmp/prog.json --force
           ADDR=$(solana-keygen pubkey /tmp/prog.json)
-          echo "Generated program address: $ADDR"
-          sed -i "s/declare_id!.*$/declare_id!(\"$ADDR\");/" /tmp/lib.rs
+          echo "Program address: $ADDR"
+          python3 -c "
+          import re, sys
+          txt = open('/tmp/lib.rs').read()
+          txt = re.sub(r'declare_id!\(\"[^\"]*\"\)', 'declare_id!(\"' + sys.argv[1] + '\")', txt)
+          open('/tmp/lib.rs','w').write(txt)
+          " "$ADDR"
           mkdir -p project/programs/$PROG/src
           cp /tmp/lib.rs project/programs/$PROG/src/lib.rs
-          printf '[workspace]\nmembers = ["programs/%s"]\nresolver = "2"\n[workspace.package]\nversion = "0.1.0"\nedition = "2021"\nrust-version = "1.84"\n[profile.release]\noverflow-checks = true\nlto = "fat"\ncodegen-units = 1\n' "$PROG" > project/Cargo.toml
-          FEAT_IDL='anchor-lang/idl-build'
-          EXTRA_DEPS=''
-          if grep -q 'anchor_spl' /tmp/lib.rs; then
-            EXTRA_DEPS=$(printf '%s' "$EXTRA_DEPS"'anchor-spl = { version = "0.30.1", features = ["token-2022", "associated-token"] }\n')
-            FEAT_IDL=$(printf '%s' "$FEAT_IDL"'", "anchor-spl/idl-build')
+          HAS_SPL=$(grep -c 'anchor_spl' /tmp/lib.rs || true)
+          HAS_T22=$(grep -c 'spl_token_2022' /tmp/lib.rs || true)
+          if [ "${HAS_SPL:-0}" -gt 0 ]; then
+            IDL_FEAT='anchor-lang/idl-build", "anchor-spl/idl-build'
+          else
+            IDL_FEAT='anchor-lang/idl-build'
           fi
-          if grep -q 'spl_token_2022' /tmp/lib.rs; then
-            EXTRA_DEPS=$(printf '%s' "$EXTRA_DEPS"'spl-token-2022 = { version = "0.9", features = ["no-entrypoint"] }\n')
-          fi
-          printf '[package]\nname = "%s"\nversion.workspace = true\nedition.workspace = true\n[lib]\ncrate-type = ["cdylib", "lib"]\nname = "%s"\n[features]\ndefault = []\nidl-build = ["%s"]\n[dependencies]\nanchor-lang = { version = "0.30.1", features = ["init-if-needed"] }\n%s' "$PROG" "$PROG" "$FEAT_IDL" "$EXTRA_DEPS" > project/programs/$PROG/Cargo.toml
-          printf '[toolchain]\nanchor_version = "0.30.1"\n[features]\nresolution = true\n[programs.localnet]\n%s = "%s"\n[registry]\nurl = "https://api.apr.dev"\n[provider]\ncluster = "Localnet"\nwallet = "~/.config/solana/id.json"\n[scripts]\ntest = "echo no-tests"\n' "$PROG" "$ADDR" > project/Anchor.toml
+          { echo '[workspace]'
+            echo "members = [\"programs/$PROG\"]"
+            echo 'resolver = "2"'
+            echo '[workspace.package]'
+            echo 'version = "0.1.0"'
+            echo 'edition = "2021"'
+            echo 'rust-version = "1.84"'
+            echo '[profile.release]'
+            echo 'overflow-checks = true'
+            echo 'lto = "fat"'
+            echo 'codegen-units = 1'
+          } > project/Cargo.toml
+          { echo '[package]'
+            echo "name = \"$PROG\""
+            echo 'version = "0.1.0"'
+            echo 'edition = "2021"'
+            echo '[lib]'
+            echo 'crate-type = ["cdylib", "lib"]'
+            echo "name = \"$PROG\""
+            echo '[features]'
+            echo 'default = []'
+            echo "idl-build = [\"$IDL_FEAT\"]"
+            echo '[dependencies]'
+            echo 'anchor-lang = { version = "0.30.1", features = ["init-if-needed"] }'
+            if [ "${HAS_SPL:-0}" -gt 0 ]; then
+              echo 'anchor-spl = { version = "0.30.1", features = ["token-2022", "associated-token"] }'
+            fi
+            if [ "${HAS_T22:-0}" -gt 0 ]; then
+              echo 'spl-token-2022 = { version = "0.9", features = ["no-entrypoint"] }'
+            fi
+          } > project/programs/$PROG/Cargo.toml
+          { echo '[toolchain]'
+            echo 'anchor_version = "0.30.1"'
+            echo '[features]'
+            echo 'resolution = true'
+            echo '[programs.localnet]'
+            echo "$PROG = \"$ADDR\""
+            echo '[registry]'
+            echo 'url = "https://api.apr.dev"'
+            echo '[provider]'
+            echo 'cluster = "Localnet"'
+            echo 'wallet = "~/.config/solana/id.json"'
+            echo '[scripts]'
+            echo 'test = "echo no-tests"'
+          } > project/Anchor.toml
           echo "PROG=$PROG" >> $GITHUB_ENV
           echo "--- Cargo.toml ---"
           cat project/programs/$PROG/Cargo.toml
@@ -103,14 +148,16 @@ jobs:
             cp "$HC" "$PT"
             echo "Replaced cargo: $($PT --version)"
           else
-            echo "platform-tools cargo not found — skipping (PT=$PT)"
+            echo "platform-tools cargo not found (PT=$PT)"
           fi
 
       - name: Pin MSRV-incompatible deps
         working-directory: project
         run: |
           mkdir -p .cargo
-          printf '[resolver]\nincompatible-rust-versions = "allow"\n' > .cargo/config.toml
+          { echo '[resolver]'
+            echo 'incompatible-rust-versions = "allow"'
+          } > .cargo/config.toml
           rm -f Cargo.lock
           cargo generate-lockfile 2>&1 || true
           cargo update blake3 --precise 1.7.0 2>&1 || cargo update blake3 --precise 1.7.1 2>&1 || true
@@ -123,7 +170,7 @@ jobs:
       - name: Patch anchor-syn
         run: |
           F=$(find ~/.cargo/registry/src -name "defined.rs" -path "*anchor-syn*" 2>/dev/null | head -1 || true)
-          if [ -z "$F" ]; then echo "anchor-syn not found in registry"; exit 0; fi
+          if [ -z "$F" ]; then echo "anchor-syn not found"; exit 0; fi
           sed -i 's/#\[cfg(procmacro2_semver_exempt)\]/#[cfg(procmacro2_semver_exempt_disabled)]/g' "$F"
           echo "Patched: $F"
 
@@ -136,7 +183,7 @@ jobs:
       - name: Save IDL
         run: |
           IDL=$(find project/target/idl -name "*.json" 2>/dev/null | head -1)
-          if [ -z "$IDL" ]; then echo "No IDL in project/target/idl/" && exit 1; fi
+          if [ -z "$IDL" ]; then echo "No IDL found" && exit 1; fi
           mkdir -p outputs
           cp "$IDL" "outputs/${{ inputs.job_id }}.json"
           echo "IDL saved: $(wc -c < outputs/${{ inputs.job_id }}.json) bytes"
