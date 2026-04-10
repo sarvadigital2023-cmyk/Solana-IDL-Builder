@@ -127,92 +127,106 @@ jobs:
           fi
 
           echo "=== declare_id ===" && grep "declare_id" anchor-project/programs/deployer/src/lib.rs
-          echo "=== Anchor.toml ===" && cat anchor-project/Anchor.toml
           echo "PROG=$PROG" >> "$GITHUB_ENV"
           echo "PROG_ADDR=$ADDR" >> "$GITHUB_ENV"
 
-      - name: Prime platform-tools (let anchor trigger download)
+      - name: Prime platform-tools download
         working-directory: anchor-project
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
           
-          # Check if platform-tools already cached
           PT_CHECK=$(find ~/.cache/solana -name "cargo" -path "*/rust/bin/cargo" -type f 2>/dev/null | head -1)
           if [ -n "$PT_CHECK" ]; then
             echo "Platform-tools already cached: $($PT_CHECK --version)"
             exit 0
           fi
           
-          echo "Platform-tools not found, triggering download via anchor build..."
-          echo "(Will fail on edition2024 — that is expected)"
-          # Run anchor build and let it run until it downloads platform-tools and hits edition2024
-          # We don't care about the exit code here
+          echo "Triggering platform-tools download via anchor build..."
           anchor build --skip-lint 2>&1 || true
           
-          echo ""
-          echo "=== Platform-tools cargo after download ==="
           find ~/.cache/solana -name "cargo" -path "*/rust/bin/cargo" -type f 2>/dev/null | while read f; do
-            echo "$f: $($f --version 2>/dev/null || echo 'error')"
+            echo "Found: $f ($($f --version 2>/dev/null || echo 'error'))"
           done
 
       - name: Replace platform-tools cargo with host cargo 1.94
         run: |
-          # Find the platform-tools cargo (in ~/.cache/solana)
           PT_CARGO=$(find ~/.cache/solana -name "cargo" -path "*/rust/bin/cargo" -type f 2>/dev/null | head -1)
-          
-          # Get the REAL cargo binary from rustup toolchain (NOT the ~/.cargo/bin/cargo shim)
           STABLE_TC=$(ls ~/.rustup/toolchains/ 2>/dev/null | grep "^stable-" | head -1)
           REAL_CARGO="$HOME/.rustup/toolchains/${STABLE_TC}/bin/cargo"
           
           if [ -z "$PT_CARGO" ]; then
-            echo "ERROR: Platform-tools cargo still not found after prime step"
-            find ~/.cache -name "cargo" -type f 2>/dev/null | head -10
+            echo "ERROR: Platform-tools cargo not found"
             exit 1
           fi
           
-          if [ ! -f "$REAL_CARGO" ]; then
-            echo "ERROR: Real host cargo not found at $REAL_CARGO"
-            ls ~/.rustup/toolchains/ 2>/dev/null
-            exit 1
-          fi
-          
-          echo "Platform-tools cargo: $PT_CARGO"
           echo "Bundled version: $($PT_CARGO --version)"
-          echo "Real host cargo: $REAL_CARGO ($($REAL_CARGO --version))"
-          
-          # Replace ONLY the platform-tools cargo with the real host cargo binary
+          echo "Host cargo: $REAL_CARGO ($($REAL_CARGO --version))"
           cp "$REAL_CARGO" "$PT_CARGO"
-          echo "Upgraded platform-tools cargo to: $($PT_CARGO --version)"
+          echo "Upgraded to: $($PT_CARGO --version)"
+
+      - name: Pin edition2024 packages to Rust-1.84-compatible versions
+        working-directory: anchor-project
+        run: |
+          export PATH="${{ env.SOLANA_BIN }}:$PATH"
+          
+          # Allow MSRV violations in cargo so it uses our pinned older versions
+          mkdir -p .cargo
+          printf '[resolver]\nincompatible-rust-versions = "allow"\n' > .cargo/config.toml
+          
+          # Use HOST cargo (host rustc 1.94.1) to generate initial Cargo.lock
+          # This avoids MSRV failures during resolution
+          cargo generate-lockfile 2>&1 | head -5 || true
+          
+          echo "=== Pinning problematic packages to pre-edition2024 versions ==="
+          
+          # RustCrypto chain
+          cargo update digest --precise 0.10.7 2>&1 || echo "digest: pin skipped"
+          cargo update crypto-common --precise 0.1.6 2>&1 || echo "crypto-common: pin skipped"
+          cargo update block-buffer --precise 0.10.4 2>&1 || echo "block-buffer: pin skipped"
+          cargo update sha2 --precise 0.10.9 2>&1 || echo "sha2: pin skipped"
+          cargo update sha3 --precise 0.10.8 2>&1 || echo "sha3: pin skipped"
+          
+          # hashbrown and indexmap
+          cargo update hashbrown --precise 0.15.5 2>&1 || echo "hashbrown: pin skipped"
+          cargo update indexmap --precise 2.7.1 2>&1 || echo "indexmap: pin skipped"
+          
+          # toml chain
+          cargo update toml_edit --precise 0.22.22 2>&1 || echo "toml_edit: pin skipped"
+          cargo update toml_datetime --precise 0.6.8 2>&1 || echo "toml_datetime: pin skipped"
+          
+          # unicode-segmentation
+          cargo update unicode-segmentation --precise 1.12.0 2>&1 || echo "unicode-seg: pin skipped"
+          
+          # Show current versions
+          echo "=== Key packages in Cargo.lock ==="
+          for PKG in hashbrown indexmap digest crypto-common block-buffer sha2 toml_edit toml_datetime; do
+            VER=$(grep -A3 "^name = \"\$PKG\"" Cargo.lock | grep "^version" | head -1 | grep -oP '"[^"]+"')
+            echo "$PKG: $VER"
+          done
 
       - name: Build Anchor project
         working-directory: anchor-project
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
+          echo "Platform-tools cargo: $(find ~/.cache/solana -name cargo -path '*/rust/bin/cargo' -type f 2>/dev/null | head -1 | xargs -I{} {} --version 2>/dev/null)"
           echo "Rust: $(rustc --version)"
           echo "anchor: $(anchor --version)"
-          echo "solana: $(solana --version)"
-          rm -f Cargo.lock
           anchor build --skip-lint 2>&1
           BUILD_EXIT=$?
           echo "Build exit code: $BUILD_EXIT"
-          echo "=== target/idl contents ==="
           ls -la target/idl/ 2>/dev/null || echo "no target/idl"
           exit $BUILD_EXIT
 
       - name: Save IDL output
         run: |
-          PROG="${{ env.PROG }}"
           JOB_ID="${{ inputs.job_id }}"
-
           IDL=$(find anchor-project/target/idl -name "*.json" 2>/dev/null | head -1)
           if [ -z "$IDL" ]; then
             echo "ERROR: No IDL in target/idl"
-            find anchor-project/target -name "*.json" 2>/dev/null | grep -v "rustc_info|fingerprint|CACHEDIR|incremental" | head -20
             exit 1
           fi
-
           echo "Found IDL: $IDL"
-          python3 -c "import json,sys; d=json.load(open('$IDL')); print('Valid JSON, keys:', list(d.keys())[:5])"
+          node -e "const f=require('fs'); const d=JSON.parse(f.readFileSync('$IDL')); console.log('Valid JSON, keys:', Object.keys(d).slice(0,5).join(','))"
           mkdir -p outputs
           cp "$IDL" "outputs/$JOB_ID.json"
 
