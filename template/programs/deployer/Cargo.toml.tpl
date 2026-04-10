@@ -2,6 +2,7 @@
 name = "{{PROG_NAME}}"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 
 [lib]
 crate-type = ["cdylib", "lib"]
