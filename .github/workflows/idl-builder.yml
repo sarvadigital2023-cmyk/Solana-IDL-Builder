@@ -153,7 +153,7 @@ jobs:
           cp "$REAL_CARGO" "$PT_CARGO"
           echo "Upgraded cargo to: $($PT_CARGO --version)"
 
-      - name: Pin dependencies to pre-Rust-1.85 versions and generate lockfile
+      - name: Pin dependencies and fetch proc-macro2 to registry
         working-directory: anchor-project
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
@@ -164,11 +164,6 @@ jobs:
           echo 'incompatible-rust-versions = "allow"' >> ~/.cargo/config.toml
           rm -f Cargo.lock
           cargo generate-lockfile 2>&1 | head -5 || true
-          echo "=== Initial key versions ==="
-          for PKG in blake3 sha3 hashbrown indexmap unicode-segmentation proc-macro-crate; do
-            VERS=$(grep -A3 "^name = \"$PKG\"" Cargo.lock | grep "^version" | awk '{print $3}' | tr -d '"' | tr '\n' ' ') || true
-            echo "  $PKG: ${VERS:-not found}"
-          done
           echo "=== Pinning packages ==="
           cargo update blake3 --precise 1.7.0 2>&1 && echo "blake3 1.7.0 OK" || (cargo update blake3 --precise 1.7.1 2>&1 && echo "blake3 1.7.1 OK" || echo "WARN: blake3 pin failed")
           cargo update sha3@0.10.8 --precise 0.10.7 2>&1 && echo "sha3 0.10.7 OK" || echo "WARN: sha3 pin failed"
@@ -176,28 +171,36 @@ jobs:
           cargo update indexmap@2.14.0 --precise 2.13.1 2>&1 && echo "indexmap 2.13.1 OK" || (cargo update indexmap@2.14.0 --precise 2.12.0 2>&1 && echo "indexmap 2.12.0 OK" || echo "WARN: indexmap pin failed")
           cargo update unicode-segmentation@1.13.2 --precise 1.12.0 2>&1 && echo "unicode-segmentation 1.12.0 OK" || echo "WARN: unicode-segmentation pin failed"
           cargo update proc-macro-crate@3.5.0 --precise 3.2.0 2>&1 && echo "proc-macro-crate 3.2.0 OK" || echo "WARN: proc-macro-crate 3.2.0 pin failed"
-          echo "=== Final versions ==="
-          for PKG in blake3 sha3 hashbrown indexmap unicode-segmentation proc-macro-crate; do
-            VERS=$(grep -A3 "^name = \"$PKG\"" Cargo.lock | grep "^version" | awk '{print $3}' | tr -d '"' | tr '\n' ' ') || true
-            echo "  $PKG: ${VERS:-not found}"
-          done
+          echo "=== Fetching registry sources ==="
+          cargo fetch 2>&1 | tail -3
 
       - name: Patch proc-macro2 build.rs to always enable procmacro2_semver_exempt
         run: |
-          PM2_DIR=$(find ~/.cargo/registry/src -name "build.rs" -path "*proc-macro2-*" 2>/dev/null | head -1 | xargs -I{} dirname {})
-          if [ -z "$PM2_DIR" ]; then
-            echo "proc-macro2 not in registry yet; downloading via cargo fetch"
-            cd anchor-project && cargo fetch 2>&1 | tail -5
-            PM2_DIR=$(find ~/.cargo/registry/src -name "build.rs" -path "*proc-macro2-*" 2>/dev/null | head -1 | xargs -I{} dirname {})
+          PM2_BUILD=$(find ~/.cargo/registry/src -name "build.rs" -path "*proc-macro2-*" -type f 2>/dev/null | head -1)
+          echo "proc-macro2 build.rs: $PM2_BUILD"
+          if [ -z "$PM2_BUILD" ]; then
+            echo "ERROR: proc-macro2 build.rs not found in registry"
+            exit 1
           fi
-          echo "proc-macro2 dir: $PM2_DIR"
-          ls "$PM2_DIR" 2>/dev/null | head -5
-          BUILD_RS="$PM2_DIR/build.rs"
-          PM2_VER=$(echo "$PM2_DIR" | grep -oP 'proc-macro2-[\d.]+' | head -1)
-          echo "Patching $PM2_VER: $BUILD_RS"
-          sed -i 's/let semver_exempt = cfg!(procmacro2_semver_exempt) || docs_rs;/let semver_exempt = true; \/\/ always enable (patched for Anchor\/Solana build)/' "$BUILD_RS"
-          echo "Patch applied. Verifying:"
-          grep "semver_exempt" "$BUILD_RS" | head -3
+          echo "=== Before patch (semver lines) ==="
+          grep -n "semver_exempt" "$PM2_BUILD"
+          python3 -c "
+import re, sys
+path = sys.argv[1]
+with open(path, 'r') as f:
+    content = f.read()
+patched = re.sub(
+    r'let semver_exempt = .*?;',
+    'let semver_exempt = true; // patched for Anchor IDL build',
+    content,
+    count=1
+)
+with open(path, 'w') as f:
+    f.write(patched)
+print('Patch applied')
+" "$PM2_BUILD"
+          echo "=== After patch ==="
+          grep -n "semver_exempt" "$PM2_BUILD"
 
       - name: Build Anchor project
         working-directory: anchor-project
