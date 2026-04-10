@@ -119,7 +119,7 @@ jobs:
           cp template/Cargo.toml anchor-project/Cargo.toml
           sed "s/{{PROG_NAME}}/$PROG/g; s/{{PROG_ADDR}}/$ADDR/g" \
             template/programs/deployer/Cargo.toml.tpl > anchor-project/programs/deployer/Cargo.toml
-          sed "s/{{PROG_NAME}}/$PROG/g; s/{{PROG_ADDR}}/$Addr/g" \
+          sed "s/{{PROG_NAME}}/$PROG/g; s/{{PROG_ADDR}}/$ADDR/g" \
             template/Anchor.toml.tpl > anchor-project/Anchor.toml
 
           if [ "$ADDR" != "$RAW_ADDR" ]; then
@@ -127,52 +127,70 @@ jobs:
           fi
 
           echo "=== declare_id ===" && grep "declare_id" anchor-project/programs/deployer/src/lib.rs
+          echo "=== Anchor.toml ===" && cat anchor-project/Anchor.toml
           echo "PROG=$PROG" >> "$GITHUB_ENV"
           echo "PROG_ADDR=$ADDR" >> "$GITHUB_ENV"
 
-      - name: Prime platform-tools download
+      - name: Prime platform-tools (let anchor trigger download)
         working-directory: anchor-project
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
-          # Trigger platform-tools download without building (will fail on edition2024 but that's ok)
-          if [ ! -d "$HOME/.cache/solana" ]; then
-            echo "Platform-tools not cached, triggering download..."
-            timeout 120 anchor build --skip-lint 2>&1 | tail -5 || echo "Expected failure during platform-tools download"
-          else
-            echo "Platform-tools already cached at ~/.cache/solana"
-            ls ~/.cache/solana/ 2>/dev/null || true
+          
+          # Check if platform-tools already cached
+          PT_CHECK=$(find ~/.cache/solana -name "cargo" -path "*/rust/bin/cargo" -type f 2>/dev/null | head -1)
+          if [ -n "$PT_CHECK" ]; then
+            echo "Platform-tools already cached: $($PT_CHECK --version)"
+            exit 0
           fi
+          
+          echo "Platform-tools not found, triggering download via anchor build..."
+          echo "(Will fail on edition2024 — that is expected)"
+          # Run anchor build and let it run until it downloads platform-tools and hits edition2024
+          # We don't care about the exit code here
+          anchor build --skip-lint 2>&1 || true
+          
+          echo ""
+          echo "=== Platform-tools cargo after download ==="
+          find ~/.cache/solana -name "cargo" -path "*/rust/bin/cargo" -type f 2>/dev/null | while read f; do
+            echo "$f: $($f --version 2>/dev/null || echo 'error')"
+          done
 
       - name: Replace platform-tools cargo with host cargo 1.94
         run: |
-          # Find the platform-tools cargo (NOT the rustup shim)
+          # Find the platform-tools cargo (in ~/.cache/solana)
           PT_CARGO=$(find ~/.cache/solana -name "cargo" -path "*/rust/bin/cargo" -type f 2>/dev/null | head -1)
           
-          # Get the REAL cargo binary from rustup (not the ~/.cargo/bin/cargo shim)
-          # The real binary is in the rustup toolchains directory
+          # Get the REAL cargo binary from rustup toolchain (NOT the ~/.cargo/bin/cargo shim)
           STABLE_TC=$(ls ~/.rustup/toolchains/ 2>/dev/null | grep "^stable-" | head -1)
           REAL_CARGO="$HOME/.rustup/toolchains/${STABLE_TC}/bin/cargo"
           
-          echo "Platform-tools cargo: ${PT_CARGO:-not found}"
-          echo "Real host cargo: ${REAL_CARGO} ($([ -f $REAL_CARGO ] && $REAL_CARGO --version || echo 'not found'))"
-          
-          if [ -n "$PT_CARGO" ] && [ -f "$REAL_CARGO" ]; then
-            echo "Bundled version: $($PT_CARGO --version)"
-            # Replace ONLY the platform-tools cargo with the real host cargo binary
-            cp "$REAL_CARGO" "$PT_CARGO"
-            echo "Upgraded to: $($PT_CARGO --version)"
-          elif [ -z "$PT_CARGO" ]; then
-            echo "ERROR: Platform-tools cargo not found. ~/.cache/solana contents:"
-            find ~/.cache/solana -type f -name "cargo" 2>/dev/null || echo "none"
+          if [ -z "$PT_CARGO" ]; then
+            echo "ERROR: Platform-tools cargo still not found after prime step"
+            find ~/.cache -name "cargo" -type f 2>/dev/null | head -10
             exit 1
           fi
+          
+          if [ ! -f "$REAL_CARGO" ]; then
+            echo "ERROR: Real host cargo not found at $REAL_CARGO"
+            ls ~/.rustup/toolchains/ 2>/dev/null
+            exit 1
+          fi
+          
+          echo "Platform-tools cargo: $PT_CARGO"
+          echo "Bundled version: $($PT_CARGO --version)"
+          echo "Real host cargo: $REAL_CARGO ($($REAL_CARGO --version))"
+          
+          # Replace ONLY the platform-tools cargo with the real host cargo binary
+          cp "$REAL_CARGO" "$PT_CARGO"
+          echo "Upgraded platform-tools cargo to: $($PT_CARGO --version)"
 
-      - name: Build Anchor project with upgraded cargo
+      - name: Build Anchor project
         working-directory: anchor-project
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
           echo "Rust: $(rustc --version)"
           echo "anchor: $(anchor --version)"
+          echo "solana: $(solana --version)"
           rm -f Cargo.lock
           anchor build --skip-lint 2>&1
           BUILD_EXIT=$?
