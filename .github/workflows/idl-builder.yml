@@ -36,8 +36,15 @@ jobs:
       - name: Install system deps
         run: sudo apt-get update -qq && sudo apt-get install -y pkg-config build-essential libudev-dev libssl-dev curl bzip2
 
-      - name: Setup Rust stable
+      - name: Setup Rust (stable + nightly)
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install nightly toolchain
+        run: |
+          rustup toolchain install nightly --no-self-update
+          rustup default nightly
+          rustc --version
+          cargo --version
 
       - name: Cache Cargo registry
         uses: actions/cache@v4
@@ -45,7 +52,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-registry-anchor0301-stable-${{ runner.os }}-v4
+          key: cargo-registry-anchor0301-nightly-${{ runner.os }}-v1
 
       - name: Cache Anchor CLI binary
         id: cache-anchor
@@ -57,8 +64,10 @@ jobs:
       - name: Install Anchor CLI 0.30.1
         if: steps.cache-anchor.outputs.cache-hit != 'true'
         run: |
+          rustup default stable
           cargo install anchor-cli --version "=0.30.1" --force
           anchor --version
+          rustup default nightly
 
       - name: Verify Anchor version
         run: anchor --version
@@ -139,60 +148,30 @@ jobs:
             echo "Found: $f ($($f --version 2>/dev/null || echo error))"
           done
 
-      - name: Replace platform-tools cargo with host cargo 1.94
+      - name: Replace platform-tools cargo with nightly cargo
         run: |
           PT_CARGO=$(find ~/.cache/solana -name "cargo" -path "*/rust/bin/cargo" -type f 2>/dev/null | head -1)
-          STABLE_TC=$(ls ~/.rustup/toolchains/ 2>/dev/null | grep "^stable-" | head -1)
-          REAL_CARGO="$HOME/.rustup/toolchains/${STABLE_TC}/bin/cargo"
+          NIGHTLY_TC=$(ls ~/.rustup/toolchains/ 2>/dev/null | grep "^nightly-" | head -1)
+          NIGHTLY_CARGO="$HOME/.rustup/toolchains/${NIGHTLY_TC}/bin/cargo"
           if [ -z "$PT_CARGO" ]; then
             echo "ERROR: Platform-tools cargo not found"
             exit 1
           fi
           echo "Bundled cargo: $($PT_CARGO --version)"
-          echo "Host cargo: $REAL_CARGO ($($REAL_CARGO --version))"
-          cp "$REAL_CARGO" "$PT_CARGO"
+          echo "Nightly cargo: $NIGHTLY_CARGO ($($NIGHTLY_CARGO --version))"
+          cp "$NIGHTLY_CARGO" "$PT_CARGO"
           echo "Upgraded cargo to: $($PT_CARGO --version)"
-
-      - name: Pin dependencies to pre-Rust-1.85 versions and generate lockfile
-        working-directory: anchor-project
-        run: |
-          export PATH="${{ env.SOLANA_BIN }}:$PATH"
-          mkdir -p .cargo ~/.cargo
-          echo "[resolver]" > .cargo/config.toml
-          echo 'incompatible-rust-versions = "allow"' >> .cargo/config.toml
-          echo "[resolver]" > ~/.cargo/config.toml
-          echo 'incompatible-rust-versions = "allow"' >> ~/.cargo/config.toml
-          rm -f Cargo.lock
-          cargo generate-lockfile 2>&1 | head -5 || true
-          echo "=== Initial key versions ==="
-          for PKG in blake3 sha3 hashbrown indexmap unicode-segmentation proc-macro-crate; do
-            VERS=$(grep -A3 "^name = \"$PKG\"" Cargo.lock | grep "^version" | awk '{print $3}' | tr -d '"' | tr '\n' ' ') || true
-            echo "  $PKG: ${VERS:-not found}"
-          done
-          echo "=== Pinning root packages ==="
-          cargo update blake3 --precise 1.7.0 2>&1 && echo "blake3 1.7.0 OK" || (cargo update blake3 --precise 1.7.1 2>&1 && echo "blake3 1.7.1 OK" || echo "WARN: blake3 pin failed")
-          cargo update sha3@0.10.8 --precise 0.10.7 2>&1 && echo "sha3 0.10.7 OK" || echo "WARN: sha3 pin failed"
-          cargo update hashbrown@0.17.0 --precise 0.16.1 2>&1 && echo "hashbrown 0.16.1 OK" || (cargo update hashbrown@0.17.0 --precise 0.15.2 2>&1 && echo "hashbrown 0.15.2 OK" || echo "WARN: hashbrown pin failed")
-          cargo update indexmap@2.14.0 --precise 2.13.1 2>&1 && echo "indexmap 2.13.1 OK" || (cargo update indexmap@2.14.0 --precise 2.12.0 2>&1 && echo "indexmap 2.12.0 OK" || echo "WARN: indexmap pin failed")
-          cargo update unicode-segmentation@1.13.2 --precise 1.12.0 2>&1 && echo "unicode-segmentation 1.12.0 OK" || echo "WARN: unicode-segmentation pin failed"
-          cargo update proc-macro-crate@3.5.0 --precise 3.2.0 2>&1 && echo "proc-macro-crate 3.2.0 OK" || echo "WARN: proc-macro-crate 3.2.0 pin failed"
-          echo "=== Final versions ==="
-          for PKG in blake3 sha3 hashbrown indexmap unicode-segmentation proc-macro-crate; do
-            VERS=$(grep -A3 "^name = \"$PKG\"" Cargo.lock | grep "^version" | awk '{print $3}' | tr -d '"' | tr '\n' ' ') || true
-            echo "  $PKG: ${VERS:-not found}"
-          done
 
       - name: Build Anchor project
         working-directory: anchor-project
         env:
           CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: allow
-          RUSTFLAGS: "--cfg proc_macro_span"
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
           PT_CARGO=$(find ~/.cache/solana -name cargo -path '*/rust/bin/cargo' -type f 2>/dev/null | head -1)
           echo "PT cargo: $($PT_CARGO --version 2>/dev/null)"
-          echo "Host rustc: $(rustc --version)"
-          echo "RUSTFLAGS=$RUSTFLAGS"
+          echo "Host nightly rustc: $(rustc --version)"
+          echo "CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=$CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS"
           anchor build --skip-lint 2>&1
           BUILD_EXIT=$?
           echo "Build exit code: $BUILD_EXIT"
