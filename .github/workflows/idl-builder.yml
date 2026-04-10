@@ -41,7 +41,7 @@ jobs:
             ~/.cargo/bin/anchor
             ~/.local/share/solana
             ~/.cache/solana
-          key: solana-anchor-${{ runner.os }}-v1
+          key: solana-anchor-${{ runner.os }}-v2
 
       - name: Install Anchor CLI
         run: |
@@ -76,55 +76,69 @@ jobs:
           fi
           mkdir -p project/programs/$PROG/src
           cp /tmp/lib.rs project/programs/$PROG/src/lib.rs
+
           cat > project/Cargo.toml << EOF
-          [workspace]
-          members = ["programs/$PROG"]
-          resolver = "2"
-          [workspace.package]
-          version = "0.1.0"
-          edition = "2021"
-          rust-version = "1.84"
-          EOF
+[workspace]
+members = ["programs/$PROG"]
+resolver = "2"
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.84"
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
+EOF
+
           cat > project/programs/$PROG/Cargo.toml << EOF
-          [package]
-          name = "$PROG"
-          version.workspace = true
-          edition.workspace = true
-          [lib]
-          crate-type = ["cdylib", "lib"]
-          name = "$PROG"
-          [features]
-          default = []
-          idl-build = ["anchor-lang/idl-build"]
-          [dependencies]
-          anchor-lang = { version = "0.30.1", features = ["init-if-needed"] }
-          EOF
+[package]
+name = "$PROG"
+version.workspace = true
+edition.workspace = true
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "$PROG"
+[features]
+default = []
+idl-build = ["anchor-lang/idl-build"]
+[dependencies]
+anchor-lang = { version = "0.30.1", features = ["init-if-needed"] }
+EOF
+
           cat > project/Anchor.toml << EOF
-          [toolchain]
-          anchor_version = "0.30.1"
-          [features]
-          resolution = true
-          [programs.localnet]
-          $PROG = "$ADDR"
-          [registry]
-          url = "https://api.apr.dev"
-          [provider]
-          cluster = "Localnet"
-          wallet = "~/.config/solana/id.json"
-          [scripts]
-          test = "echo 'no tests'"
-          EOF
+[toolchain]
+anchor_version = "0.30.1"
+[features]
+resolution = true
+[programs.localnet]
+$PROG = "$ADDR"
+[registry]
+url = "https://api.apr.dev"
+[provider]
+cluster = "Localnet"
+wallet = "~/.config/solana/id.json"
+[scripts]
+test = "echo 'no tests'"
+EOF
           echo "PROG=$PROG" >> $GITHUB_ENV
 
       - name: Download platform-tools
         working-directory: project
-        run: anchor build --skip-lint 2>&1 || true
+        run: |
+          anchor build --skip-lint 2>&1 || true
+          find ~/.cache/solana -name cargo -path '*/rust/bin/cargo' -type f 2>/dev/null | head -3 || echo "platform-tools not at ~/.cache/solana yet"
 
       - name: Use host cargo (fixes edition 2024)
         run: |
-          PT=$(find ~/.cache/solana -name cargo -path '*/rust/bin/cargo' -type f | head -1)
-          HC=$(find ~/.rustup/toolchains -name cargo -path '*/bin/cargo' -type f | grep stable | head -1)
-          [ -n "$PT" ] && [ -n "$HC" ] && cp "$HC" "$PT" && echo "Replaced $PT with $HC"
+          PT=$(find ~/.cache/solana -name cargo -path '*/rust/bin/cargo' -type f 2>/dev/null | head -1 || true)
+          HC=$(find ~/.rustup/toolchains -name cargo -path '*/bin/cargo' -type f 2>/dev/null | grep stable | head -1 || true)
+          if [ -n "$PT" ] && [ -n "$HC" ]; then
+            cp "$HC" "$PT"
+            echo "Replaced bundled cargo with host cargo: $($PT --version)"
+          else
+            echo "WARN: PT=$PT HC=$HC — skipping (platform-tools may not be downloaded yet)"
+          fi
 
       - name: Pin MSRV-incompatible deps
         working-directory: project
@@ -143,8 +157,8 @@ jobs:
 
       - name: Patch anchor-syn (disable broken source_file call)
         run: |
-          F=$(find ~/.cargo/registry/src -name "defined.rs" -path "*anchor-syn*" | head -1)
-          [ -z "$F" ] && echo "anchor-syn not found" && exit 1
+          F=$(find ~/.cargo/registry/src -name "defined.rs" -path "*anchor-syn*" 2>/dev/null | head -1)
+          if [ -z "$F" ]; then echo "anchor-syn not found — skipping"; exit 0; fi
           sed -i 's/#\[cfg(procmacro2_semver_exempt)\]/#[cfg(procmacro2_semver_exempt_disabled)]/g' "$F"
           echo "Patched: $F"
 
@@ -156,11 +170,11 @@ jobs:
 
       - name: Save IDL
         run: |
-          IDL=$(find project/target/idl -name "*.json" | head -1)
-          [ -z "$IDL" ] && echo "No IDL found" && exit 1
+          IDL=$(find project/target/idl -name "*.json" 2>/dev/null | head -1)
+          if [ -z "$IDL" ]; then echo "No IDL found in project/target/idl/" && exit 1; fi
           mkdir -p outputs
           cp "$IDL" "outputs/${{ inputs.job_id }}.json"
-          echo "IDL saved: $(cat outputs/${{ inputs.job_id }}.json | head -c 200)"
+          echo "Saved IDL: $(python3 -c "import json,sys; d=json.load(open('outputs/${{ inputs.job_id }}.json')); print(d.get('metadata',{}).get('name','?'), 'instructions:', len(d.get('instructions',[])))")"
 
       - name: Commit IDL
         run: |
