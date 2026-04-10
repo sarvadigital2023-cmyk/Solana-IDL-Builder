@@ -76,6 +76,8 @@ jobs:
           import re, sys
           txt = open('/tmp/lib.rs').read()
           txt = re.sub(r'declare_id!\(\"[^\"]*\"\)', 'declare_id!(\"' + sys.argv[1] + '\")', txt)
+          # spl-token-2022 v3+: TransferHook.program_id is OptionalNonZeroPubkey, not Pubkey
+          txt = txt.replace('hook.program_id.into()', 'hook.program_id.0')
           open('/tmp/lib.rs','w').write(txt)
           " "$ADDR"
           mkdir -p project/programs/$PROG/src
@@ -115,7 +117,7 @@ jobs:
               echo 'anchor-spl = { version = "0.30.1", features = ["token_2022", "associated_token"] }'
             fi
             if [ "${HAS_T22:-0}" -gt 0 ]; then
-              echo 'spl-token-2022 = { version = "0.9", features = ["no-entrypoint"] }'
+              echo 'spl-token-2022 = { version = "3", features = ["no-entrypoint"] }'
             fi
           } > project/programs/$PROG/Cargo.toml
           { echo '[toolchain]'
