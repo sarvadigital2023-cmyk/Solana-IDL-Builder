@@ -63,12 +63,14 @@ jobs:
       - name: Verify Anchor version
         run: anchor --version
 
-      - name: Cache Solana 2.3.1
+      - name: Cache Solana and platform-tools
         id: cache-solana
         uses: actions/cache@v4
         with:
-          path: ${{ env.SOLANA_INSTALL_DIR }}
-          key: solana-${{ env.SOLANA_VERSION }}-${{ runner.os }}-v1
+          path: |
+            ${{ env.SOLANA_INSTALL_DIR }}
+            ~/.cache/solana
+          key: solana-${{ env.SOLANA_VERSION }}-${{ runner.os }}-v2
 
       - name: Install Solana ${{ env.SOLANA_VERSION }}
         if: steps.cache-solana.outputs.cache-hit != 'true'
@@ -85,21 +87,6 @@ jobs:
         run: |
           echo "${{ env.SOLANA_BIN }}" >> "$GITHUB_PATH"
           "${{ env.SOLANA_BIN }}/solana" --version
-
-      - name: Debug Solana dir structure and find bundled cargo
-        run: |
-          echo "=== Solana BIN dir ==="
-          ls "${{ env.SOLANA_BIN }}/" | head -20
-          echo "=== sdk/sbf dir (if exists) ==="
-          ls "${{ env.SOLANA_BIN }}/sdk/sbf/" 2>/dev/null || echo "not found"
-          echo "=== sdk/sbf/dependencies/ (if exists) ==="
-          ls "${{ env.SOLANA_BIN }}/sdk/sbf/dependencies/" 2>/dev/null || echo "not found"
-          echo "=== Finding all 'cargo' binaries in Solana install ==="
-          find "${{ env.SOLANA_INSTALL_DIR }}" -name "cargo" -type f 2>/dev/null
-          echo "=== Finding platform-tools or bpf-tools dirs ==="
-          find "${{ env.SOLANA_INSTALL_DIR }}" -name "platform-tools" -o -name "bpf-tools" 2>/dev/null | head -5
-          echo "=== CARGO_HOME/RUSTUP info ==="
-          which cargo && cargo --version
 
       - name: Solana keygen
         run: |
@@ -132,7 +119,7 @@ jobs:
           cp template/Cargo.toml anchor-project/Cargo.toml
           sed "s/{{PROG_NAME}}/$PROG/g; s/{{PROG_ADDR}}/$ADDR/g" \
             template/programs/deployer/Cargo.toml.tpl > anchor-project/programs/deployer/Cargo.toml
-          sed "s/{{PROG_NAME}}/$PROG/g; s/{{PROG_ADDR}}/$ADDR/g" \
+          sed "s/{{PROG_NAME}}/$PROG/g; s/{{PROG_ADDR}}/$Addr/g" \
             template/Anchor.toml.tpl > anchor-project/Anchor.toml
 
           if [ "$ADDR" != "$RAW_ADDR" ]; then
@@ -143,42 +130,49 @@ jobs:
           echo "PROG=$PROG" >> "$GITHUB_ENV"
           echo "PROG_ADDR=$ADDR" >> "$GITHUB_ENV"
 
-      - name: Trigger platform-tools install then upgrade bundled cargo
+      - name: Prime platform-tools download
         working-directory: anchor-project
         run: |
           export PATH="${{ env.SOLANA_BIN }}:$PATH"
-          # anchor build downloads platform-tools on first run
-          # Run it once to trigger download, then replace cargo, then build again
-          echo "=== Triggering platform-tools install (will fail due to edition2024) ==="
-          anchor build --skip-lint 2>&1 | head -30 || true
-          
-          echo ""
-          echo "=== Finding bundled cargo after platform-tools install ==="
-          find "${{ env.SOLANA_INSTALL_DIR }}" -name "cargo" -type f 2>/dev/null
-          find /home/runner -name "cargo" -type f 2>/dev/null | grep -v ".cargo/bin" | head -5
-          find /root -name "cargo" -type f 2>/dev/null | grep -v ".cargo/bin" | head -5
-
-      - name: Replace bundled cargo with host cargo and build
-        working-directory: anchor-project
-        run: |
-          export PATH="${{ env.SOLANA_BIN }}:$PATH"
-          HOST_CARGO=$(which cargo)
-          echo "Host cargo: $(cargo --version)"
-          
-          # Find and replace ALL bundled cargo binaries
-          FOUND=0
-          for BUNDLED in $(find /home/runner -name "cargo" -type f 2>/dev/null | grep -v ".cargo/bin"); do
-            echo "Replacing: $BUNDLED ($($BUNDLED --version 2>/dev/null || echo unknown))"
-            cp "$HOST_CARGO" "$BUNDLED"
-            echo "  -> replaced with $($BUNDLED --version)"
-            FOUND=1
-          done
-          if [ "$FOUND" = "0" ]; then
-            echo "No bundled cargo found to replace"
+          # Trigger platform-tools download without building (will fail on edition2024 but that's ok)
+          if [ ! -d "$HOME/.cache/solana" ]; then
+            echo "Platform-tools not cached, triggering download..."
+            timeout 120 anchor build --skip-lint 2>&1 | tail -5 || echo "Expected failure during platform-tools download"
+          else
+            echo "Platform-tools already cached at ~/.cache/solana"
+            ls ~/.cache/solana/ 2>/dev/null || true
           fi
+
+      - name: Replace platform-tools cargo with host cargo 1.94
+        run: |
+          # Find the platform-tools cargo (NOT the rustup shim)
+          PT_CARGO=$(find ~/.cache/solana -name "cargo" -path "*/rust/bin/cargo" -type f 2>/dev/null | head -1)
           
-          echo ""
-          echo "=== Building Anchor project (with host cargo replacing bundled) ==="
+          # Get the REAL cargo binary from rustup (not the ~/.cargo/bin/cargo shim)
+          # The real binary is in the rustup toolchains directory
+          STABLE_TC=$(ls ~/.rustup/toolchains/ 2>/dev/null | grep "^stable-" | head -1)
+          REAL_CARGO="$HOME/.rustup/toolchains/${STABLE_TC}/bin/cargo"
+          
+          echo "Platform-tools cargo: ${PT_CARGO:-not found}"
+          echo "Real host cargo: ${REAL_CARGO} ($([ -f $REAL_CARGO ] && $REAL_CARGO --version || echo 'not found'))"
+          
+          if [ -n "$PT_CARGO" ] && [ -f "$REAL_CARGO" ]; then
+            echo "Bundled version: $($PT_CARGO --version)"
+            # Replace ONLY the platform-tools cargo with the real host cargo binary
+            cp "$REAL_CARGO" "$PT_CARGO"
+            echo "Upgraded to: $($PT_CARGO --version)"
+          elif [ -z "$PT_CARGO" ]; then
+            echo "ERROR: Platform-tools cargo not found. ~/.cache/solana contents:"
+            find ~/.cache/solana -type f -name "cargo" 2>/dev/null || echo "none"
+            exit 1
+          fi
+
+      - name: Build Anchor project with upgraded cargo
+        working-directory: anchor-project
+        run: |
+          export PATH="${{ env.SOLANA_BIN }}:$PATH"
+          echo "Rust: $(rustc --version)"
+          echo "anchor: $(anchor --version)"
           rm -f Cargo.lock
           anchor build --skip-lint 2>&1
           BUILD_EXIT=$?
@@ -195,6 +189,7 @@ jobs:
           IDL=$(find anchor-project/target/idl -name "*.json" 2>/dev/null | head -1)
           if [ -z "$IDL" ]; then
             echo "ERROR: No IDL in target/idl"
+            find anchor-project/target -name "*.json" 2>/dev/null | grep -v "rustc_info|fingerprint|CACHEDIR|incremental" | head -20
             exit 1
           fi
 
