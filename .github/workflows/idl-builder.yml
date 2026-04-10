@@ -112,7 +112,7 @@ jobs:
             echo '[dependencies]'
             echo 'anchor-lang = { version = "0.30.1", features = ["init-if-needed"] }'
             if [ "${HAS_SPL:-0}" -gt 0 ]; then
-              echo 'anchor-spl = { version = "0.30.1", features = ["token-2022", "associated-token"] }'
+              echo 'anchor-spl = { version = "0.30.1", features = ["token-2022", "associated_token"] }'
             fi
             if [ "${HAS_T22:-0}" -gt 0 ]; then
               echo 'spl-token-2022 = { version = "0.9", features = ["no-entrypoint"] }'
