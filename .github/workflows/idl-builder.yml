@@ -165,7 +165,7 @@ jobs:
           rm -f Cargo.lock
           cargo generate-lockfile 2>&1 | head -5 || true
           echo "=== Initial key versions ==="
-          for PKG in blake3 sha3 hashbrown indexmap unicode-segmentation; do
+          for PKG in blake3 sha3 hashbrown indexmap unicode-segmentation proc-macro-crate; do
             VERS=$(grep -A3 "^name = \"$PKG\"" Cargo.lock | grep "^version" | awk '{print $3}' | tr -d '"' | tr '\n' ' ') || true
             echo "  $PKG: ${VERS:-not found}"
           done
@@ -175,8 +175,9 @@ jobs:
           cargo update hashbrown@0.17.0 --precise 0.16.1 2>&1 && echo "hashbrown 0.16.1 OK" || (cargo update hashbrown@0.17.0 --precise 0.15.2 2>&1 && echo "hashbrown 0.15.2 OK" || echo "WARN: hashbrown pin failed")
           cargo update indexmap@2.14.0 --precise 2.13.1 2>&1 && echo "indexmap 2.13.1 OK" || (cargo update indexmap@2.14.0 --precise 2.12.0 2>&1 && echo "indexmap 2.12.0 OK" || echo "WARN: indexmap pin failed")
           cargo update unicode-segmentation@1.13.2 --precise 1.12.0 2>&1 && echo "unicode-segmentation 1.12.0 OK" || echo "WARN: unicode-segmentation pin failed"
+          cargo update proc-macro-crate@3.5.0 --precise 3.2.0 2>&1 && echo "proc-macro-crate 3.2.0 OK" || echo "WARN: proc-macro-crate 3.2.0 pin failed"
           echo "=== Final versions ==="
-          for PKG in blake3 sha3 hmac digest crypto-common block-buffer cmov ctutils constant_time_eq hashbrown indexmap unicode-segmentation; do
+          for PKG in blake3 sha3 hashbrown indexmap unicode-segmentation proc-macro-crate; do
             VERS=$(grep -A3 "^name = \"$PKG\"" Cargo.lock | grep "^version" | awk '{print $3}' | tr -d '"' | tr '\n' ' ') || true
             echo "  $PKG: ${VERS:-not found}"
           done
@@ -191,7 +192,6 @@ jobs:
           PT_CARGO=$(find ~/.cache/solana -name cargo -path '*/rust/bin/cargo' -type f 2>/dev/null | head -1)
           echo "PT cargo: $($PT_CARGO --version 2>/dev/null)"
           echo "Host rustc: $(rustc --version)"
-          echo "CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=$CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS"
           echo "RUSTFLAGS=$RUSTFLAGS"
           anchor build --skip-lint 2>&1
           BUILD_EXIT=$?
