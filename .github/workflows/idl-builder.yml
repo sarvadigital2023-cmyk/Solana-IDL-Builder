@@ -94,67 +94,75 @@ jobs:
           else
             IDL_FEAT='anchor-lang/idl-build'
           fi
-          cat > project/programs/$PROG/Cargo.toml << EOF
-          [package]
-          name = "$PROG"
-          version = "0.1.0"
-          edition = "2021"
-
-          [lib]
-          crate-type = ["cdylib", "lib"]
-          name = "$PROG"
-
-          [features]
-          default = []
-          cpi = ["no-entrypoint"]
-          no-entrypoint = []
-          no-idl = []
-          no-log-ix-name = []
-          idl-build = ["$IDL_FEAT"]
-
-          [dependencies]
-          anchor-lang = { version = "0.30.1", features = ["init-if-needed"] }
-          anchor-spl = { version = "0.30.1", features = ["token", "token_2022", "associated_token"] }
-          spl-token-2022 = { version = "4.0.0", features = ["no-entrypoint"] }
-          EOF
-          cat > project/Anchor.toml << EOF
-          [toolchain]
-          anchor_version = "0.30.1"
-
-          [features]
-          resolution = true
-          skip-lint = true
-
-          [programs.localnet]
-          $PROG = "$ADDR"
-
-          [provider]
-          cluster = "Localnet"
-          wallet = "~/.config/solana/id.json"
-
-          [scripts]
-          test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
-          EOF
-          cat > project/Cargo.toml << EOF
-          [workspace]
-          members = ["programs/*"]
-          resolver = "2"
-          EOF
-          mkdir -p project/.cargo
-          {
-            echo '[net]'
-            echo 'git-fetch-with-cli = true'
-            echo '[term]'
-            echo 'quiet = false'
-            echo '[build]'
-            echo 'jobs = 4'
+          { echo '[workspace]'
+            echo "members = [\"programs/$PROG\"]"
+            echo 'resolver = "2"'
+            echo '[workspace.package]'
+            echo 'version = "0.1.0"'
+            echo 'edition = "2021"'
+            echo 'rust-version = "1.84"'
             echo '[profile.release]'
             echo 'overflow-checks = true'
-            echo 'lto = "thin"'
-            echo 'opt-level = 2'
-            echo 'incremental = false'
+            echo 'lto = "fat"'
             echo 'codegen-units = 1'
-            echo '[workspace.resolver]'
+          } > project/Cargo.toml
+          { echo '[package]'
+            echo "name = \"$PROG\""
+            echo 'version = "0.1.0"'
+            echo 'edition = "2021"'
+            echo '[lib]'
+            echo 'crate-type = ["cdylib", "lib"]'
+            echo "name = \"$PROG\""
+            echo '[features]'
+            echo 'default = []'
+            echo "idl-build = [\"$IDL_FEAT\"]"
+            echo '[dependencies]'
+            echo 'anchor-lang = { version = "0.30.1", features = ["init-if-needed"] }'
+            if [ "${HAS_SPL:-0}" -gt 0 ]; then
+              echo 'anchor-spl = { version = "0.30.1", features = ["token_2022", "associated_token"] }'
+            fi
+            if [ "${HAS_T22:-0}" -gt 0 ]; then
+              echo 'spl-token-2022 = { version = "3", features = ["no-entrypoint"] }'
+            fi
+          } > project/programs/$PROG/Cargo.toml
+          { echo '[toolchain]'
+            echo 'anchor_version = "0.30.1"'
+            echo '[features]'
+            echo 'resolution = true'
+            echo '[programs.localnet]'
+            echo "$PROG = \"$ADDR\""
+            echo '[registry]'
+            echo 'url = "https://api.apr.dev"'
+            echo '[provider]'
+            echo 'cluster = "Localnet"'
+            echo 'wallet = "~/.config/solana/id.json"'
+            echo '[scripts]'
+            echo 'test = "echo no-tests"'
+          } > project/Anchor.toml
+          echo "PROG=$PROG" >> $GITHUB_ENV
+          echo "--- Cargo.toml ---"
+          cat project/programs/$PROG/Cargo.toml
+
+      - name: Download platform-tools
+        working-directory: project
+        run: anchor build --skip-lint 2>&1 || true
+
+      - name: Use host cargo (fixes edition 2024)
+        run: |
+          PT=$(find ~/.cache/solana -name cargo -path '*/rust/bin/cargo' -type f 2>/dev/null | head -1 || true)
+          HC=$(find ~/.rustup/toolchains -name cargo -path '*/bin/cargo' -type f 2>/dev/null | grep stable | head -1 || true)
+          if [ -n "$PT" ] && [ -n "$HC" ]; then
+            cp "$HC" "$PT"
+            echo "Replaced cargo: $($PT --version)"
+          else
+            echo "platform-tools cargo not found (PT=$PT)"
+          fi
+
+      - name: Pin MSRV-incompatible deps
+        working-directory: project
+        run: |
+          mkdir -p .cargo
+          { echo '[resolver]'
             echo 'incompatible-rust-versions = "allow"'
           } > .cargo/config.toml
           rm -f Cargo.lock
@@ -187,7 +195,7 @@ jobs:
           cp "$IDL" "outputs/${{ inputs.job_id }}.json"
           echo "IDL saved: $(wc -c < outputs/${{ inputs.job_id }}.json) bytes"
 
-      - name: Commit outputs
+      - name: Commit IDL
         run: |
           git pull --rebase origin main || true
           git add "outputs/${{ inputs.job_id }}.json"
