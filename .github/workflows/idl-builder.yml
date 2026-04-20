@@ -5,6 +5,10 @@ on:
       job_id:
         required: true
         type: string
+      program_id:
+        required: false
+        type: string
+        default: ''
 
 env:
   SOLANA_VERSION: "2.3.1"
@@ -69,9 +73,15 @@ jobs:
         run: |
           PROG=$(grep -oP 'pub mod \K\w+' /tmp/lib.rs | head -1 || echo "deployer")
           echo "Program name: $PROG"
-          solana-keygen new --no-bip39-passphrase -o /tmp/prog.json --force
-          ADDR=$(solana-keygen pubkey /tmp/prog.json)
-          echo "Program address: $ADDR"
+          PROVIDED_ID="${{ inputs.program_id }}"
+          if [ -n "$PROVIDED_ID" ]; then
+            ADDR="$PROVIDED_ID"
+            echo "Using provided program_id: $ADDR"
+          else
+            solana-keygen new --no-bip39-passphrase -o /tmp/prog.json --force
+            ADDR=$(solana-keygen pubkey /tmp/prog.json)
+            echo "Generated program address: $ADDR"
+          fi
           python3 -c "
           import re, sys
           txt = open('/tmp/lib.rs').read()
@@ -115,7 +125,7 @@ jobs:
             echo "name = \"$PROG\""
             echo '[features]'
             echo 'default = []'
-            echo "idl-build = [\"$IDL_FEAT\"]"
+            echo "idl-build = [\"\$IDL_FEAT\"]"
             echo '[dependencies]'
             echo 'anchor-lang = { version = "0.30.1", features = ["init-if-needed"] }'
             if [ "${HAS_SPL:-0}" -gt 0 ]; then
@@ -187,19 +197,27 @@ jobs:
           CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: allow
         run: anchor build --skip-lint
 
-      - name: Save IDL
+      - name: Save IDL and binary
         run: |
           IDL=$(find project/target/idl -name "*.json" 2>/dev/null | head -1)
           if [ -z "$IDL" ]; then echo "No IDL found" && exit 1; fi
           mkdir -p outputs
           cp "$IDL" "outputs/${{ inputs.job_id }}.json"
           echo "IDL saved: $(wc -c < outputs/${{ inputs.job_id }}.json) bytes"
+          SO=$(find project/target/deploy -name "*.so" 2>/dev/null | head -1)
+          if [ -n "$SO" ]; then
+            gzip -c "$SO" > "outputs/${{ inputs.job_id }}.so.gz"
+            echo "Binary saved: $(wc -c < outputs/${{ inputs.job_id }}.so.gz) bytes (gzipped)"
+          else
+            echo "Binary not found — IDL only"
+          fi
 
-      - name: Commit IDL
+      - name: Commit outputs
         run: |
           git pull --rebase origin main || true
           git add "outputs/${{ inputs.job_id }}.json"
+          [ -f "outputs/${{ inputs.job_id }}.so.gz" ] && git add "outputs/${{ inputs.job_id }}.so.gz" || true
           git -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
               -c user.name="github-actions[bot]" \
-              commit -m "IDL for ${{ inputs.job_id }}"
+              commit -m "IDL + binary for ${{ inputs.job_id }}"
           git push
